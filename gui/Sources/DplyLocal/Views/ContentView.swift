@@ -1,0 +1,295 @@
+import SwiftUI
+
+/// Three-column layout: a branded, grouped sidebar · the item list · the detail
+/// pane. The middle and detail columns swap content based on the selected
+/// section.
+struct ContentView: View {
+    @EnvironmentObject var store: Store
+    @State private var selection: String?
+
+    var body: some View {
+        NavigationSplitView {
+            sidebar
+                .navigationSplitViewColumnWidth(min: 196, ideal: 212)
+        } content: {
+            listColumn
+                .navigationSplitViewColumnWidth(min: 280, ideal: 340)
+        } detail: {
+            detailColumn
+        }
+        .tint(Theme.violet)
+        .toolbar { toolbarContent }
+        .onChange(of: store.section) { selection = nil; Task { await store.refreshCurrentSection() } }
+        .overlay(alignment: .top) {
+            VStack(spacing: 6) {
+                if let paused = store.pausedDump {
+                    PauseBanner(dump: paused) { action in Task { await store.resumeDump(action) } }
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                if let error = store.lastError {
+                    ErrorBanner(message: error) { store.lastError = nil }
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: store.lastError)
+        .animation(.easeInOut(duration: 0.2), value: store.pausedDump)
+    }
+
+    // MARK: Sidebar
+
+    private var sidebar: some View {
+        List(selection: $store.section) {
+            Section("Local") {
+                sidebarRow(.local)
+                sidebarRow(.services)
+                sidebarRow(.mail)
+                sidebarRow(.dumps)
+                sidebarRow(.php)
+            }
+            Section("dply") {
+                sidebarRow(.edgeSites)
+                sidebarRow(.sites)
+                sidebarRow(.servers)
+                sidebarRow(.account)
+            }
+        }
+        .safeAreaInset(edge: .top) { brandHeader }
+        .safeAreaInset(edge: .bottom) { hostFooter }
+    }
+
+    private func sidebarRow(_ section: Surface) -> some View {
+        Label {
+            Text(section.rawValue)
+        } icon: {
+            Image(systemName: section.systemImage)
+                .foregroundStyle(store.section == section ? AnyShapeStyle(Theme.brand) : AnyShapeStyle(.secondary))
+        }
+        .tag(section)
+    }
+
+    private var brandHeader: some View {
+        HStack(spacing: 9) {
+            GradientTile(systemImage: "bolt.horizontal.fill", size: 30)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Dply Local").font(.headline)
+                Text("local dev + dply").font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 6)
+        .background(.bar)
+    }
+
+    // MARK: Middle column
+
+    @ViewBuilder
+    private var listColumn: some View {
+        switch store.section {
+        case .local:
+            siteList(
+                store.localSites,
+                systemImage: "globe",
+                emptyTitle: "No local sites",
+                emptyIcon: "house",
+                emptyHint: "Use ➕ to link a project or park a folder. Each becomes <name>.test.",
+                title: ["name"], subtitle: ["host"],
+                statusFor: { $0.dig("serving") == .bool(true) ? "serving" : "stopped" },
+                activeFor: { $0.dig("serving") == .bool(true) }
+            )
+        case .services:
+            ServicesListView(selection: $selection)
+        case .mail:
+            MailListView(selection: $selection)
+        case .dumps:
+            DumpsListView(selection: $selection)
+        case .php:
+            PhpListView()
+        case .edgeSites:
+            siteList(
+                store.edgeSites, systemImage: "bolt.horizontal.circle.fill",
+                emptyTitle: "No edge sites", emptyIcon: "bolt.horizontal.circle",
+                emptyHint: dplyHint,
+                title: ["name"], subtitle: ["build.framework", "framework", "live_url"],
+                statusFor: { $0.cell(["status"]) }, activeFor: { _ in true }
+            )
+        case .sites:
+            siteList(
+                store.sites, systemImage: "server.rack",
+                emptyTitle: "No server sites", emptyIcon: "server.rack",
+                emptyHint: dplyHint,
+                title: ["name"], subtitle: ["server.name", "server_name", "runtime"],
+                statusFor: { $0.cell(["status"]) }, activeFor: { _ in true }
+            )
+        case .servers:
+            siteList(
+                store.servers, systemImage: "externaldrive.fill",
+                emptyTitle: "No servers", emptyIcon: "externaldrive",
+                emptyHint: dplyHint,
+                title: ["name"], subtitle: ["provider", "region", "ip_address", "ip"],
+                statusFor: { $0.cell(["status"]) }, activeFor: { _ in true }
+            )
+        case .account:
+            AccountView()
+        }
+    }
+
+    private var dplyHint: String {
+        "Go to Account to log in to dply, then refresh."
+    }
+
+    private func siteList(
+        _ rows: [Row],
+        systemImage: String,
+        emptyTitle: String, emptyIcon: String, emptyHint: String,
+        title: [String], subtitle: [String],
+        statusFor: @escaping (Row) -> String,
+        activeFor: @escaping (Row) -> Bool
+    ) -> some View {
+        List(selection: $selection) {
+            if rows.isEmpty && !store.isLoading {
+                ContentUnavailableView(emptyTitle, systemImage: emptyIcon, description: Text(emptyHint))
+            }
+            ForEach(rows) { row in
+                ItemRow(
+                    title: row.cell(title),
+                    subtitle: row.cell(subtitle),
+                    status: statusFor(row),
+                    systemImage: systemImage,
+                    active: activeFor(row)
+                )
+                .tag(row.id)
+            }
+        }
+        .overlay { if store.isLoading { ProgressView().controlSize(.small) } }
+    }
+
+    // MARK: Detail column
+
+    @ViewBuilder
+    private var detailColumn: some View {
+        switch store.section {
+        case .local:
+            if let id = selection, let row = store.localSites.first(where: { $0.id == id }) {
+                LocalDetailView(site: row).id(id)
+            } else { placeholder("Select a site", "house") }
+        case .services:
+            if let id = selection, let row = store.dbServices.first(where: { $0.cell(["name"]) == id }) {
+                DatabasesView(service: row).id(id)
+            } else {
+                placeholder("Select an instance to manage databases", "cylinder.split.1x2")
+            }
+        case .mail:
+            if let id = selection {
+                MailDetailView(id: id).id(id)
+            } else { placeholder("Select a message", "envelope") }
+        case .dumps:
+            if let id = selection, let n = Int(id), let dump = store.dumps.first(where: { $0.id == n }) {
+                DumpDetailView(dump: dump).id(id)
+            } else { placeholder("Select a dump", "ladybug") }
+        case .php:
+            PhpDetailView()
+        case .edgeSites:
+            if let id = selection { EdgeDetailView(siteID: id).id(id) } else { placeholder("Select an edge site", "bolt.horizontal.circle") }
+        case .sites:
+            if let id = selection { SiteDetailView(siteID: id).id(id) } else { placeholder("Select a site", "server.rack") }
+        case .servers:
+            if let id = selection, let row = store.servers.first(where: { $0.id == id }) {
+                ServerDetailView(server: row).id(id)
+            } else { placeholder("Select a server", "externaldrive") }
+        case .account:
+            AccountDetailView()
+        }
+    }
+
+    private func placeholder(_ title: String, _ icon: String) -> some View {
+        ContentUnavailableView(title, systemImage: icon)
+    }
+
+    // MARK: Footer + toolbar
+
+    private var hostFooter: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(store.isAuthenticated ? Theme.live : Color.secondary)
+                    .frame(width: 7, height: 7)
+                Text(store.activeHost)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+        }
+        .background(.bar)
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if store.section == .local {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Link a project…") { pickFolder(park: false) }
+                    Button("Park a folder…") { pickFolder(park: true) }
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .help("Add a local site")
+            }
+        }
+        if store.section == .mail && !store.mailMessages.isEmpty {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await store.clearMail() }
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .help("Clear all captured mail")
+            }
+        }
+        if store.section == .dumps && !store.dumps.isEmpty {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await store.clearDumps() }
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .help("Clear all dumps")
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                Task { await store.refreshAll() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .help("Refresh")
+            .disabled(store.isLoading)
+        }
+    }
+
+    /// Prompt for a directory and either link it as one site or park it so its
+    /// subfolders each become sites.
+    private func pickFolder(park: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = park ? "Park" : "Link"
+        panel.message = park
+            ? "Choose a folder whose subdirectories are your projects."
+            : "Choose a single project directory to serve as <name>.test."
+        if panel.runModal() == .OK, let url = panel.url {
+            Task {
+                if park { await store.parkLocal(path: url.path) }
+                else { await store.linkLocal(path: url.path) }
+            }
+        }
+    }
+}

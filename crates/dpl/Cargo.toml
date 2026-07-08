@@ -1,0 +1,19 @@
+[package]
+name = "dpl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Local PHP dev environment + dply client (CLI)."
+
+[[bin]]
+name = "dpl"
+path = "src/main.rs"
+
+[dependencies]
+dpl-core = { workspace = true }
+dpl-dply = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

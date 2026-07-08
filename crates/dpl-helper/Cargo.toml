@@ -1,0 +1,15 @@
+[package]
+name = "dpl-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "One-shot privileged helper for dpl (CA trust, resolver, low ports)."
+
+[[bin]]
+name = "dpl-helper"
+path = "src/main.rs"
+
+[dependencies]
+dpl-core = { workspace = true }
+anyhow = { workspace = true }

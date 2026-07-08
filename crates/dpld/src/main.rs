@@ -1,0 +1,121 @@
+//! `dpld` — the per-user dpl daemon.
+//!
+//! Owns the control socket (lifecycle + site-management verbs) and the local
+//! HTTP reverse proxy that serves `.test` sites from per-site `php -S`
+//! backends. Later phases attach DNS, HTTPS, multi-PHP, and DB services to this
+//! same process.
+
+mod ca;
+mod dns;
+mod dumps;
+mod fastcgi;
+mod fpm;
+mod mail;
+mod proxy;
+mod registry;
+mod server;
+mod services;
+mod tls;
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::Context;
+use tokio::sync::Mutex;
+
+fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("DPLD_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+
+    rt.block_on(async {
+        // Bind the proxy first so we know which port we actually got.
+        let (listener, http_port) = proxy::bind_preferred().await?;
+        tracing::info!(port = http_port, "proxy listening");
+        if http_port != 80 {
+            tracing::warn!(
+                "serving on :{http_port}. Run `dpl setup` (sudo) once to route .test and \
+                 redirect :80/:443, then browse http://<name>.test with no port."
+            );
+        }
+
+        // Build the site registry and start backends for the saved config.
+        let mut registry = registry::Registry::load().context("loading registry")?;
+        let serving = registry.reconcile();
+        tracing::info!(sites = serving, "initial reconcile complete");
+        let registry = Arc::new(Mutex::new(registry));
+
+        // HTTP server.
+        let proxy_task = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                if let Err(e) = proxy::serve(listener, registry, http_port).await {
+                    tracing::error!(error = %e, "http server stopped");
+                }
+            })
+        };
+
+        // HTTPS server (best-effort: needs the local CA; logs and continues if
+        // it can't bind or build TLS).
+        let tls_task = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                if let Err(e) = tls::serve(registry).await {
+                    tracing::warn!(error = %e, "https server not started");
+                }
+            })
+        };
+
+        // DNS responder for *.test (used once the resolver is installed).
+        let dns_task = tokio::spawn(async move {
+            if let Err(e) = dns::serve().await {
+                tracing::warn!(error = %e, "dns responder not started");
+            }
+        });
+
+        // Mail sink (SMTP → ~/.dpl/mail).
+        let mail_task = tokio::spawn(async move {
+            if let Err(e) = mail::serve().await {
+                tracing::warn!(error = %e, "mail sink not started");
+            }
+        });
+
+        // Dumps receiver (LaraDumps-style debugger).
+        let dumps_buf = dumps::Dumps::new();
+        let dumps_task = {
+            let dumps_buf = dumps_buf.clone();
+            tokio::spawn(async move {
+                if let Err(e) = dumps::serve(dumps_buf).await {
+                    tracing::warn!(error = %e, "dumps receiver not started");
+                }
+            })
+        };
+
+        let mut svc = services::Services::new();
+        let started = svc.reconcile();
+        tracing::info!(instances = started, "service instances reconciled");
+        let services = Arc::new(Mutex::new(svc));
+        let state = server::DaemonState {
+            started: Instant::now(),
+            registry,
+            services,
+            http_port,
+        };
+        let result = server::run(state).await;
+
+        proxy_task.abort();
+        tls_task.abort();
+        dns_task.abort();
+        mail_task.abort();
+        dumps_task.abort();
+        result
+    })
+}
