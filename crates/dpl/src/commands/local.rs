@@ -45,6 +45,38 @@ pub fn sites(home: Option<&str>, json: bool) -> Result<()> {
     }
 }
 
+pub fn proxy_set(home: Option<&str>, name: String, target: String) -> Result<()> {
+    send_message(home, Request::Proxy { action: "set".into(), name, target: Some(target) })
+}
+
+pub fn proxy_remove(home: Option<&str>, name: String) -> Result<()> {
+    send_message(home, Request::Proxy { action: "remove".into(), name, target: None })
+}
+
+/// List reverse proxies (the `proxy`-source entries from the site list).
+pub fn proxies(home: Option<&str>, json: bool) -> Result<()> {
+    match daemon::call(Request::ListSites, home)? {
+        Response::Sites { sites, .. } => {
+            let proxies: Vec<&SiteInfo> = sites.iter().filter(|s| s.source == "proxy").collect();
+            if json {
+                let arr: Vec<_> = proxies.iter().map(|s| serde_json::json!({ "host": s.host, "target": s.path })).collect();
+                println!("{}", serde_json::to_string_pretty(&arr)?);
+                return Ok(());
+            }
+            if proxies.is_empty() {
+                println!("No proxies. Add one: `dpl proxy blog http://localhost:3000`.");
+                return Ok(());
+            }
+            let w = proxies.iter().map(|s| s.host.len()).max().unwrap_or(4);
+            for s in proxies {
+                println!("{:<w$}  →  {}", s.host, s.path, w = w);
+            }
+            Ok(())
+        }
+        other => crate::commands::unexpected(other),
+    }
+}
+
 pub fn park(home: Option<&str>, path: Option<String>) -> Result<()> {
     send_message(home, Request::Park { path: resolve_path(path)? })
 }
@@ -81,13 +113,24 @@ pub fn open(home: Option<&str>, name: Option<String>) -> Result<()> {
     open_in_browser(&url)
 }
 
-/// List installed PHP versions (no daemon needed).
+/// List installed PHP versions (no daemon needed). Marks the current default
+/// (the config's `default_php`, else the `php` on PATH) — used by the menu bar.
 pub fn php_list(json: bool) -> Result<()> {
+    php_list_home(None, json)
+}
+
+pub fn php_list_home(home: Option<&str>, json: bool) -> Result<()> {
     let versions = dpl_core::php::detect();
+    let default_version = current_default_php(home, &versions);
+    let is_default = |v: &str| Some(v) == default_version.as_deref();
+
     if json {
         let arr: Vec<_> = versions
             .iter()
-            .map(|v| serde_json::json!({ "version": v.version, "binary": v.binary, "source": v.source }))
+            .map(|v| serde_json::json!({
+                "version": v.version, "binary": v.binary, "source": v.source,
+                "default": is_default(&v.version),
+            }))
             .collect();
         println!("{}", serde_json::to_string_pretty(&arr)?);
         return Ok(());
@@ -96,17 +139,400 @@ pub fn php_list(json: bool) -> Result<()> {
         println!("No PHP found. Install one (e.g. `brew install php`).");
         return Ok(());
     }
-    println!("{:<8}  {:<10}  BINARY", "VERSION", "SOURCE");
+    println!("{:<8}  {:<10}  {:<8}  BINARY", "VERSION", "SOURCE", "DEFAULT");
     for v in &versions {
-        println!("{:<8}  {:<10}  {}", v.version, v.source, v.binary.display());
+        println!("{:<8}  {:<10}  {:<8}  {}", v.version, v.source,
+            if is_default(&v.version) { "✓" } else { "" }, v.binary.display());
     }
     Ok(())
+}
+
+/// Identify a foreign web server holding a local port, or `None` if the port is
+/// free. For :80 (plaintext) we read the HTTP `Server:` header (e.g. `Apache`,
+/// `nginx`); for others we just report that something is listening.
+pub(crate) fn port_server(port: u16) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(300)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(600)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(600)));
+
+    if port == 80 {
+        let _ = stream.write_all(b"HEAD / HTTP/1.0\r\nHost: dpl.probe\r\nConnection: close\r\n\r\n");
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let text = String::from_utf8_lossy(&buf[..n]);
+        for line in text.lines() {
+            if let Some(rest) = line.to_ascii_lowercase().strip_prefix("server:") {
+                let name = rest.trim();
+                let short = name.split(['/', ' ']).next().unwrap_or(name);
+                return Some(if short.is_empty() { "another server".into() } else { short.to_string() });
+            }
+        }
+        return Some("another web server".into());
+    }
+    // Something accepted the connection (e.g. nginx/Valet on TLS :443).
+    Some("another server".into())
+}
+
+/// The default PHP version: config's `default_php`, else the version of the
+/// `php` binary on PATH.
+fn current_default_php(home: Option<&str>, versions: &[dpl_core::php::PhpVersion]) -> Option<String> {
+    let path = dpl_core::paths::local_config(home).ok()?;
+    if let Ok(cfg) = dpl_core::config::LocalConfig::load(&path) {
+        if let Some(v) = cfg.default_php {
+            return Some(v);
+        }
+    }
+    let _ = versions;
+    dpl_core::php::default_version()
 }
 
 /// Pin a PHP version for a site, or the global default with `--default`.
 pub fn use_php(home: Option<&str>, version: String, name: Option<String>, default: bool) -> Result<()> {
     let site = if default { None } else { Some(resolve_name(name)?) };
     send_message(home, Request::UsePhp { version, site })
+}
+
+/// List every installable PHP version and its status — backs the GUI version
+/// manager. No daemon or network needed; reads Homebrew's on-disk layout.
+pub fn php_available(json: bool) -> Result<()> {
+    let catalog = dpl_core::php::catalog();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&catalog)?);
+        return Ok(());
+    }
+    println!("{:<8}  {:<10}  STATUS", "VERSION", "FORMULA");
+    for e in &catalog {
+        let status = if e.active {
+            "active"
+        } else if e.broken {
+            "broken"
+        } else if e.installed {
+            "installed"
+        } else {
+            "not installed"
+        };
+        println!("{:<8}  {:<10}  {}", e.version, e.formula, status);
+    }
+    Ok(())
+}
+
+/// Normalize `8.3`, `php@8.3`, or `8.3.2` down to a `major.minor` line.
+fn normalize_php_version(input: &str) -> Result<String> {
+    let s = input.trim().trim_start_matches("php@").trim_start_matches("php");
+    let parts: Vec<&str> = s.split('.').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        anyhow::bail!("expected a PHP version like 8.3 (got `{input}`)");
+    }
+    Ok(format!("{}.{}", parts[0], parts[1]))
+}
+
+/// Run `brew <args>` inheriting stdio so output streams live to the GUI pipe.
+fn brew(args: &[&str]) -> Result<bool> {
+    let status = std::process::Command::new("brew")
+        .args(args)
+        .status()
+        .context("running brew")?;
+    Ok(status.success())
+}
+
+fn ensure_brew() -> Result<()> {
+    if which("brew").is_none() {
+        anyhow::bail!("Homebrew not found. Install it from https://brew.sh, then re-run.");
+    }
+    Ok(())
+}
+
+/// Install a PHP line via Homebrew. Older lines that aren't in homebrew-core
+/// live in the `shivammathur/php` tap, which we tap and retry against on demand.
+pub fn php_install(version: &str) -> Result<()> {
+    ensure_brew()?;
+    let v = normalize_php_version(version)?;
+    let formula = format!("php@{v}");
+    println!("Installing {formula} via Homebrew — this may take several minutes…\n");
+    if !brew(&["install", &formula])? {
+        println!("\n{formula} isn't in homebrew-core; tapping shivammathur/php and retrying…\n");
+        let _ = brew(&["tap", "shivammathur/php"])?;
+        let tapped = format!("shivammathur/php/php@{v}");
+        if !brew(&["install", &tapped])? {
+            anyhow::bail!("`brew install {formula}` failed.");
+        }
+    }
+    println!("\n✓ PHP {v} installed. Activate it with `dpl use {v} --default`.");
+    Ok(())
+}
+
+/// Upgrade a PHP line to its newest patch release via Homebrew.
+pub fn php_upgrade(version: &str) -> Result<()> {
+    ensure_brew()?;
+    let v = normalize_php_version(version)?;
+    let formula = format!("php@{v}");
+    println!("Upgrading {formula} via Homebrew…\n");
+    if !brew(&["upgrade", &formula])? {
+        anyhow::bail!("`brew upgrade {formula}` failed (it may already be up to date).");
+    }
+    println!("\n✓ PHP {v} upgraded.");
+    Ok(())
+}
+
+/// Uninstall a PHP line via Homebrew.
+pub fn php_uninstall(version: &str) -> Result<()> {
+    ensure_brew()?;
+    let v = normalize_php_version(version)?;
+    let formula = format!("php@{v}");
+    println!("Uninstalling {formula} via Homebrew…\n");
+    if !brew(&["uninstall", "--ignore-dependencies", &formula])? {
+        anyhow::bail!("`brew uninstall {formula}` failed.");
+    }
+    println!("\n✓ PHP {v} uninstalled.");
+    Ok(())
+}
+
+/// Repair a broken PHP install. A structurally-missing keg (no binary) is
+/// reinstalled; then any conf.d extension that points at a missing `.so` is
+/// commented out so the version starts cleanly.
+pub fn php_repair(version: &str) -> Result<()> {
+    let v = normalize_php_version(version)?;
+    let formula = format!("php@{v}");
+
+    // Structural: no runnable binary at all → reinstall the keg.
+    if dpl_core::php::resolve(&v).is_none() {
+        ensure_brew()?;
+        println!("Reinstalling {formula} — this may take several minutes…\n");
+        if !brew(&["reinstall", &formula])? {
+            anyhow::bail!("`brew reinstall {formula}` failed.");
+        }
+    }
+
+    // Extension-level: disable conf.d entries that load a missing library.
+    println!("Checking extensions for PHP {v}…");
+    let disabled = php_fix_extensions(&v)?;
+    if disabled.is_empty() {
+        println!("  No broken extensions found.");
+    } else {
+        println!("  Disabled {} broken extension(s):", disabled.len());
+        for d in &disabled {
+            println!("    • {d}");
+        }
+        println!("  Reinstall an extension formula to restore it, e.g. `brew reinstall php@{v}-imap`.");
+    }
+    println!("\n✓ PHP {v} repaired.");
+    Ok(())
+}
+
+/// Comment out any `extension=`/`zend_extension=` directive in a PHP line's
+/// conf.d whose target `.so` is missing — the cause of "Unable to load dynamic
+/// library" startup warnings. Returns `file → directive` for each one disabled.
+fn php_fix_extensions(version: &str) -> Result<Vec<String>> {
+    let bin = dpl_core::php::resolve(version)
+        .with_context(|| format!("PHP {version} isn't installed"))?;
+
+    // The additional-.ini scan directory. Keep the ini loaded (so the scan path
+    // is reported) but route any broken-extension warning to stderr, leaving
+    // stdout clean to parse.
+    let ini_out = std::process::Command::new(&bin)
+        .arg("-d").arg("display_errors=stderr")
+        .arg("--ini")
+        .output()
+        .context("running php --ini")?;
+    let ini_text = String::from_utf8_lossy(&ini_out.stdout);
+    let Some(scan_dir) = ini_text
+        .lines()
+        .find(|l| l.contains("Scan for additional"))
+        .and_then(|l| l.split_once(": "))
+        .map(|(_, p)| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+
+    // extension_dir (configured), for resolving bare extension names to a `.so`.
+    let ext_dir = std::process::Command::new(&bin)
+        .arg("-d").arg("display_errors=stderr")
+        .arg("-r").arg("echo ini_get('extension_dir');")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut disabled = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&scan_dir) else { return Ok(disabled) };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ini") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let mut changed = false;
+        let rebuilt: Vec<String> = content
+            .lines()
+            .map(|line| {
+                let t = line.trim_start();
+                if t.starts_with(';') || t.starts_with('#') {
+                    return line.to_string();
+                }
+                let directive = t
+                    .strip_prefix("zend_extension=")
+                    .or_else(|| t.strip_prefix("extension="));
+                let Some(rest) = directive else { return line.to_string() };
+                let val = rest.split(';').next().unwrap_or("").trim().trim_matches('"');
+                if val.is_empty() {
+                    return line.to_string();
+                }
+                let so = if val.contains('/') {
+                    std::path::PathBuf::from(val)
+                } else {
+                    let name = if val.ends_with(".so") { val.to_string() } else { format!("{val}.so") };
+                    match &ext_dir {
+                        Some(d) => std::path::PathBuf::from(d).join(name),
+                        None => std::path::PathBuf::from(name),
+                    }
+                };
+                if so.exists() {
+                    return line.to_string();
+                }
+                changed = true;
+                let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                disabled.push(format!("{file} → {val}"));
+                format!("; disabled by dpl (missing {}): {line}", so.display())
+            })
+            .collect();
+        if changed {
+            let mut out = rebuilt.join("\n");
+            if content.ends_with('\n') {
+                out.push('\n');
+            }
+            std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+        }
+    }
+    Ok(disabled)
+}
+
+/// The conf.d scan directory for a PHP version.
+fn php_conf_dir(version: &str) -> Option<std::path::PathBuf> {
+    let bin = dpl_core::php::resolve(version)?;
+    let out = std::process::Command::new(&bin)
+        .arg("-d").arg("display_errors=stderr").arg("--ini").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .find(|l| l.contains("Scan for additional"))
+        .and_then(|l| l.split_once(": "))
+        .map(|(_, p)| std::path::PathBuf::from(p.trim().trim_matches('"')))
+}
+
+/// Extension names already present in a version's conf.d (enabled or disabled).
+fn installed_ext_names(version: &str) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    let Some(dir) = php_conf_dir(version) else { return set };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return set };
+    for e in entries.flatten() {
+        let f = e.file_name().to_string_lossy().into_owned();
+        if !f.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        let base = f.trim_end_matches(".disabled").trim_end_matches(".ini");
+        let name = match base.split_once('-') {
+            Some((num, rest)) if num.chars().all(|c| c.is_ascii_digit()) => rest,
+            _ => base,
+        };
+        set.insert(name.to_lowercase());
+    }
+    set
+}
+
+/// Every extension the `shivammathur/extensions` tap offers for a PHP version.
+fn brew_ext_catalog(version: &str) -> Vec<String> {
+    let Ok(out) = std::process::Command::new("brew")
+        .arg("search").arg("shivammathur/extensions/").output()
+    else {
+        return vec![];
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let suffix = format!("@{version}");
+    let mut names: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("shivammathur/extensions/").map(str::to_string))
+        .filter_map(|s| s.strip_suffix(&suffix).map(str::to_string))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// List extensions installable for a version that aren't already present.
+pub fn php_ext_available(version: &str, json: bool) -> Result<()> {
+    let v = normalize_php_version(version)?;
+    let installed = installed_ext_names(&v);
+    let catalog = brew_ext_catalog(&v);
+    let available: Vec<&String> = catalog.iter().filter(|n| !installed.contains(&n.to_lowercase())).collect();
+
+    if json {
+        let arr: Vec<_> = available.iter().map(|n| serde_json::json!({ "name": n })).collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+        return Ok(());
+    }
+    if catalog.is_empty() {
+        println!("No extension catalog found. Tap it with: brew tap shivammathur/extensions");
+        return Ok(());
+    }
+    println!("{} extension(s) installable for PHP {v}:", available.len());
+    for n in &available {
+        println!("  {n}");
+    }
+    Ok(())
+}
+
+/// Install a PECL/Homebrew extension for a version via the shivammathur tap.
+pub fn php_ext_install(version: &str, name: &str) -> Result<()> {
+    ensure_brew()?;
+    let v = normalize_php_version(version)?;
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        anyhow::bail!("invalid extension name: {name}");
+    }
+    let formula = format!("shivammathur/extensions/{name}@{v}");
+    println!("Installing {formula} via Homebrew — this may take a minute…\n");
+    let _ = brew(&["tap", "shivammathur/extensions"])?;
+    if !brew(&["install", &formula])? {
+        anyhow::bail!("`brew install {formula}` failed.");
+    }
+    println!("\n✓ {name} installed for PHP {v}. Restart php-fpm (dpl restart) to load it.");
+    Ok(())
+}
+
+/// Uninstall an extension for a version (brew uninstall the tap formula).
+pub fn php_ext_uninstall(version: &str, name: &str) -> Result<()> {
+    ensure_brew()?;
+    let v = normalize_php_version(version)?;
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        anyhow::bail!("invalid extension name: {name}");
+    }
+    let formula = format!("shivammathur/extensions/{name}@{v}");
+    println!("Uninstalling {formula} via Homebrew…\n");
+    if !brew(&["uninstall", "--ignore-dependencies", &formula])? {
+        anyhow::bail!("`brew uninstall {formula}` failed.");
+    }
+    println!("\n✓ {name} uninstalled for PHP {v}.");
+    Ok(())
+}
+
+/// Fix broken extensions for a PHP line without a full reinstall.
+pub fn php_fix(version: &str) -> Result<()> {
+    let v = normalize_php_version(version)?;
+    let disabled = php_fix_extensions(&v)?;
+    if disabled.is_empty() {
+        println!("No broken extensions found for PHP {v}.");
+    } else {
+        println!("Disabled {} broken extension(s) for PHP {v}:", disabled.len());
+        for d in &disabled {
+            println!("  • {d}");
+        }
+        println!("\nReinstall an extension formula to restore it, e.g. `brew reinstall php@{v}-imap`.");
+    }
+    Ok(())
 }
 
 /// Show (and optionally follow) a local site's request log.
@@ -194,6 +620,11 @@ pub fn restart(home: Option<&str>) -> Result<()> {
     send_message(home, Request::Reload)
 }
 
+/// Hard-reset all backends (stop + reap php-fpm/Octane, then rebuild).
+pub fn repair_backends(home: Option<&str>) -> Result<()> {
+    send_message(home, Request::RepairBackends)
+}
+
 /// Show where the tool keeps its files.
 pub fn paths(home: Option<&str>) -> Result<()> {
     let p = |label: &str, path: std::path::PathBuf| println!("{label:<14}{}", path.display());
@@ -202,65 +633,6 @@ pub fn paths(home: Option<&str>) -> Result<()> {
     p("socket", dpl_core::paths::daemon_socket(home)?);
     p("certs", dpl_core::paths::certs_dir(home)?);
     p("logs", dpl_core::paths::logs_dir(home)?);
-    Ok(())
-}
-
-/// Environment health check.
-pub fn doctor(home: Option<&str>) -> Result<()> {
-    let ok = "\u{2713}";
-    let bad = "\u{2717}";
-    let warn = "\u{26a0}";
-    println!("dpl doctor\n");
-
-    // PHP.
-    let phps = dpl_core::php::detect();
-    if phps.is_empty() {
-        println!("{bad} PHP: none found — install with `brew install php`");
-    } else {
-        let list: Vec<String> = phps.iter().map(|p| p.version.clone()).collect();
-        println!("{ok} PHP: {}", list.join(", "));
-    }
-
-    // Daemon + proxy.
-    match daemon::call(Request::ListSites, home) {
-        Ok(Response::Sites { sites, http_port, .. }) => {
-            println!("{ok} daemon: running");
-            let serving = sites.iter().filter(|s| s.serving).count();
-            println!("{ok} proxy: port {http_port}");
-            if http_port != 80 {
-                println!("{warn} sites on :{http_port} — run `dpl setup` (sudo) for clean http://<name>.test on :80");
-            }
-            println!("{ok} sites: {} registered, {serving} serving", sites.len());
-        }
-        _ => println!("{bad} daemon: not running — start it with `dpld`"),
-    }
-
-    // Database/cache services (incl. externally-managed ones like DBngin).
-    if std::path::Path::new("/Applications/DBngin.app").exists() {
-        println!("{ok} DBngin: detected — using its running engines");
-    }
-    let svc_req = Request::Service { action: "list".into(), name: None, engine: None, version: None, port: None };
-    if let Ok(Response::ServiceList { services }) = daemon::call(svc_req, home) {
-        for s in &services {
-            let mark = if s.running { ok } else if s.installed { warn } else { warn };
-            let state = if s.external {
-                "running (external, e.g. DBngin/Postgres.app)".to_string()
-            } else if s.running {
-                "running (managed by dpl)".to_string()
-            } else if s.installed {
-                "installed, stopped".to_string()
-            } else {
-                "not installed".to_string()
-            };
-            println!("{mark} {}: {state} on port {}", s.name, s.port);
-        }
-    }
-
-    // Optional tooling.
-    match which("cloudflared") {
-        Some(_) => println!("{ok} cloudflared: installed (dpl share available)"),
-        None => println!("{warn} cloudflared: not installed (dpl share needs it)"),
-    }
     Ok(())
 }
 
@@ -371,14 +743,23 @@ fn service_install(spec: &str) -> Result<()> {
         Some((e, v)) => (e.to_lowercase(), Some(v.to_string())),
         None => (spec.to_lowercase(), None),
     };
-    let formula = match engine.as_str() {
-        "postgres" | "postgresql" | "pg" => format!("postgresql@{}", version.as_deref().unwrap_or("17")),
-        "mysql" => version.map(|v| format!("mysql@{v}")).unwrap_or_else(|| "mysql".into()),
-        "mariadb" => version.map(|v| format!("mariadb@{v}")).unwrap_or_else(|| "mariadb".into()),
-        "redis" => version.map(|v| format!("redis@{v}")).unwrap_or_else(|| "redis".into()),
-        other => anyhow::bail!("unknown engine `{other}` (postgres|mysql|mariadb|redis)"),
+    // (formula, optional tap that provides it).
+    let (formula, tap): (String, Option<&str>) = match engine.as_str() {
+        "postgres" | "postgresql" | "pg" => (format!("postgresql@{}", version.as_deref().unwrap_or("17")), None),
+        "mysql" => (version.map(|v| format!("mysql@{v}")).unwrap_or_else(|| "mysql".into()), None),
+        "mariadb" => (version.map(|v| format!("mariadb@{v}")).unwrap_or_else(|| "mariadb".into()), None),
+        "redis" => (version.map(|v| format!("redis@{v}")).unwrap_or_else(|| "redis".into()), None),
+        "meilisearch" | "meili" => ("meilisearch".into(), None),
+        "mongodb" | "mongo" => ("mongodb-community".into(), Some("mongodb/brew")),
+        "minio" | "s3" | "rustfs" => ("minio".into(), None),
+        "stripe-mock" | "stripemock" | "stripe" => ("stripe-mock".into(), Some("stripe/stripe-mock")),
+        other => anyhow::bail!("unknown service `{other}` (postgres|mysql|mariadb|redis|meilisearch|mongodb|minio|stripe-mock)"),
     };
 
+    if let Some(t) = tap {
+        println!("Tapping {t}…");
+        let _ = std::process::Command::new("brew").args(["tap", t]).status();
+    }
     println!("Installing {formula} via Homebrew — this may take a minute…\n");
     let status = std::process::Command::new("brew")
         .arg("install")
@@ -588,6 +969,240 @@ pub fn setup(home: Option<&str>, ports: bool) -> Result<()> {
     Ok(())
 }
 
+/// Take over local `.test` serving from Valet/Apache: stop them so dpl can own
+/// ports 80/443, install dpl's resolver + trusted HTTPS + port redirect, and
+/// restart the daemon. Interactive (uses sudo) — run in a Terminal.
+pub fn takeover(home: Option<&str>) -> Result<()> {
+    use std::process::Command as Cmd;
+    let step = |desc: &str, cmd: &str, args: &[&str]| {
+        println!("• {desc}");
+        let _ = Cmd::new(cmd).args(args).status();
+    };
+
+    println!("Take over ports 80/443 from Valet/Apache\n");
+    println!("Valet's nginx and Apache are holding :80/:443, so the browser hits them");
+    println!("instead of dpl. This stops and DISABLES them so dpl serves your sites.");
+    println!("You'll be prompted for your password (sudo).\n");
+
+    // 1) Valet's own stop (handles its nginx/dnsmasq/php-fpm cleanly).
+    if which("valet").is_some() {
+        step("Stopping Valet…", "valet", &["stop"]);
+    }
+
+    // 2) Disable the root-level brew services the Valet/Apache stack uses so
+    //    they don't respawn on boot (this is what `valet stop` alone misses).
+    if which("brew").is_some() {
+        for svc in ["nginx", "httpd", "dnsmasq"] {
+            step(&format!("Disabling brew service {svc}…"), "sudo", &["brew", "services", "stop", svc]);
+        }
+    }
+
+    // 3) macOS built-in Apache (the "It works!" server), stopped + kept down.
+    step("Stopping Apache…", "sudo", &["apachectl", "stop"]);
+    step(
+        "Disabling Apache autostart…",
+        "sudo",
+        &["launchctl", "unload", "-w", "/System/Library/LaunchDaemons/org.apache.httpd.plist"],
+    );
+
+    // 4) Force-kill any stragglers still bound to the ports.
+    step("Clearing leftover nginx…", "sudo", &["pkill", "-x", "nginx"]);
+    step("Clearing leftover httpd…", "sudo", &["pkill", "-x", "httpd"]);
+
+    // 5) Install dpl's resolver, trust the CA, redirect :80/:443.
+    println!("\n• Configuring dpl (resolver, trusted HTTPS, :80/:443 redirect)…");
+    setup(home, true)?;
+
+    // 6) Restart the daemon so it rebinds cleanly.
+    println!("\n• Restarting the dpl daemon…");
+    let _ = crate::commands::daemon::manage(home, "restart".to_string());
+
+    // 7) Verify the ports are actually free now.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    println!();
+    let foreign = |s: &str| {
+        let l = s.to_lowercase();
+        l.contains("nginx") || l.contains("apache") || l.contains("valet")
+    };
+    match port_server(80) {
+        Some(s) if foreign(&s) => {
+            println!("⚠ Port 80 is STILL held by {s}.");
+            println!("  Something is respawning it. Find it with:");
+            println!("      sudo lsof -nP -iTCP:80 -sTCP:LISTEN");
+            println!("  then stop that service (e.g. `sudo brew services stop <name>`).");
+        }
+        _ => {
+            println!("✓ Ports are clear — dpl now serves http://<name>.test (and https://).");
+            println!("  Reload a site in your browser.");
+        }
+    }
+    Ok(())
+}
+
+/// Set a linked site's runtime (assumes the server is already installed).
+pub fn set_runtime(home: Option<&str>, site: String, runtime: String) -> Result<()> {
+    send_message(home, Request::SetRuntime { site, runtime })
+}
+
+/// Install Laravel Octane in a site's project and switch it to that server.
+/// Runs `composer require laravel/octane` + `php artisan octane:install` in the
+/// project (this modifies the app), installing Swoole/FrankenPHP/RoadRunner as
+/// needed, then flips the site's runtime.
+pub fn octane_setup(home: Option<&str>, site: &str, server: &str) -> Result<()> {
+    use std::process::Command as Cmd;
+    let server = server.to_lowercase();
+    if !["swoole", "roadrunner", "frankenphp"].contains(&server.as_str()) {
+        anyhow::bail!("unknown server `{server}` (swoole | roadrunner | frankenphp)");
+    }
+
+    // Locate the site's project + PHP version from the config.
+    let cfg_path = dpl_core::paths::local_config(home)?;
+    let cfg = dpl_core::config::LocalConfig::load(&cfg_path)?;
+    let link = cfg
+        .links
+        .get(&site.to_lowercase())
+        .with_context(|| format!("no linked site named `{site}` (Octane applies to linked Laravel apps)"))?;
+    let project = link.path.clone();
+    if !project.join("artisan").is_file() {
+        anyhow::bail!("`{site}` isn't a Laravel app (no artisan at {}).", project.display());
+    }
+    let version = link.php.clone().or(cfg.default_php.clone()).or_else(dpl_core::php::default_version);
+    let php = link
+        .php
+        .as_deref()
+        .and_then(dpl_core::php::resolve)
+        .unwrap_or_else(dpl_core::php::default_binary);
+
+    println!("Setting up Laravel Octane ({server}) for `{site}` in {}…\n", project.display());
+
+    // Swoole needs its PHP extension; FrankenPHP/RoadRunner binaries are
+    // fetched by octane:install.
+    if server == "swoole" {
+        if let Some(v) = &version {
+            println!("• Installing the swoole extension for PHP {v}…");
+            let _ = php_ext_install(v, "swoole");
+        }
+    }
+
+    // composer require laravel/octane (in the project).
+    println!("\n• composer require laravel/octane …");
+    if which("composer").is_none() {
+        anyhow::bail!("Composer not found — install it (brew install composer) and re-run.");
+    }
+    let ok = Cmd::new("composer")
+        .arg("require").arg("laravel/octane").arg("--no-interaction")
+        .current_dir(&project).status().map(|s| s.success()).unwrap_or(false);
+    if !ok {
+        anyhow::bail!("`composer require laravel/octane` failed.");
+    }
+
+    // php artisan octane:install --server=<server>.
+    println!("\n• php artisan octane:install --server={server} …");
+    let ok = Cmd::new(&php)
+        .arg("artisan").arg("octane:install")
+        .arg(format!("--server={server}"))
+        .arg("--no-interaction")
+        .current_dir(&project).status().map(|s| s.success()).unwrap_or(false);
+    if !ok {
+        anyhow::bail!("`artisan octane:install` failed.");
+    }
+
+    // Flip the runtime (daemon starts the server + proxies to it).
+    println!("\n• Switching `{site}` to octane-{server}…");
+    send_message(home, Request::SetRuntime { site: site.to_string(), runtime: format!("octane-{server}") })?;
+    println!("\n✓ `{site}` now runs on Laravel Octane ({server}). Reload it in your browser.");
+    Ok(())
+}
+
+/// Switch how `.test` resolves: `hosts` (per-site /etc/hosts entries — keeps
+/// iCloud Private Relay working) or `resolver` (wildcard DNS). Installs/removes
+/// the NOPASSWD sudoers rule that lets the daemon keep /etc/hosts in sync.
+pub fn resolution(home: Option<&str>, mode: Option<String>) -> Result<()> {
+    let mode = mode.unwrap_or_else(|| "status".into());
+    let helper = helper_path()?;
+    let helper_str = helper.to_string_lossy().into_owned();
+    let user = std::env::var("USER").unwrap_or_default();
+    let tlds = configured_tlds(home)?;
+
+    match mode.as_str() {
+        "hosts" => {
+            println!("Switching .test resolution to /etc/hosts (keeps iCloud Private Relay on).");
+            println!("Installs a sudoers rule so dpl can update /etc/hosts without a password.\n");
+            // Let the daemon update /etc/hosts silently from now on.
+            sudo(&helper, &["install-sudoers", &user, &helper_str])?;
+            // Drop the DNS resolver files (the Private Relay trigger).
+            for tld in &tlds {
+                let _ = sudo(&helper, &["remove-resolver", tld]);
+            }
+            // Daemon writes the current sites into /etc/hosts.
+            match daemon::call(Request::SetResolution { mode: "hosts".into() }, home)? {
+                Response::Message { text } => println!("\n✓ {text}"),
+                other => return crate::commands::unexpected(other),
+            }
+            println!("  Private Relay should re-enable within a minute.");
+        }
+        "resolver" => {
+            // Clear /etc/hosts first (while the sudoers rule still permits it).
+            let _ = daemon::call(Request::SetResolution { mode: "resolver".into() }, home)?;
+            let _ = sudo(&helper, &["remove-sudoers"]);
+            for tld in &tlds {
+                sudo(&helper, &["install-resolver", tld, "5333"])?;
+            }
+            println!("✓ Back to wildcard DNS resolution for .test.");
+        }
+        _ => {
+            let current = current_resolution(home);
+            println!("Resolution mode: {current}");
+            println!("  dpl resolution hosts     — per-site /etc/hosts (Private Relay stays on)");
+            println!("  dpl resolution resolver  — wildcard DNS (default)");
+        }
+    }
+    Ok(())
+}
+
+/// Read the configured resolution mode from the local config.
+fn current_resolution(home: Option<&str>) -> String {
+    dpl_core::paths::local_config(home)
+        .ok()
+        .and_then(|p| dpl_core::config::LocalConfig::load(&p).ok())
+        .and_then(|c| c.resolution)
+        .unwrap_or_else(|| "resolver".into())
+}
+
+/// Reverse [`takeover`]: give ports 80/443 back to Valet. Removes dpl's port
+/// redirect + resolver, re-enables Valet's nginx/dnsmasq daemons, and starts
+/// Valet. dpl keeps working on :8080/:8443. Interactive (sudo).
+pub fn untakeover(home: Option<&str>) -> Result<()> {
+    use std::process::Command as Cmd;
+    let step = |desc: &str, cmd: &str, args: &[&str]| {
+        println!("• {desc}");
+        let _ = Cmd::new(cmd).args(args).status();
+    };
+
+    println!("Restore Valet — hand ports 80/443 back\n");
+    println!("Removes dpl's port redirect and re-enables Valet's nginx/dnsmasq.");
+    println!("dpl stays available on :8080/:8443. You'll be prompted for your password.\n");
+
+    // 1) Remove dpl's :80/:443 redirect + resolver + CA trust.
+    println!("• Removing dpl's port redirect and resolver…");
+    let _ = unsetup(home);
+
+    // 2) Re-enable Valet's root daemons.
+    if which("brew").is_some() {
+        for svc in ["nginx", "dnsmasq"] {
+            step(&format!("Re-enabling brew service {svc}…"), "sudo", &["brew", "services", "start", svc]);
+        }
+    }
+
+    // 3) Let Valet reconfigure itself (resolver, nginx config, php).
+    if which("valet").is_some() {
+        step("Starting Valet…", "valet", &["start"]);
+    }
+
+    println!("\n✓ Valet restored. dpl sites remain at http://<name>.test:8080 (and :8443 for HTTPS).");
+    Ok(())
+}
+
 /// Undo `dpl setup`.
 pub fn unsetup(home: Option<&str>) -> Result<()> {
     let helper = helper_path()?;
@@ -651,7 +1266,7 @@ fn helper_path() -> Result<std::path::PathBuf> {
 }
 
 /// `which <name>` → path, or None.
-fn which(name: &str) -> Option<String> {
+pub(crate) fn which(name: &str) -> Option<String> {
     let out = std::process::Command::new("/usr/bin/env").arg("which").arg(name).output().ok()?;
     if !out.status.success() {
         return None;

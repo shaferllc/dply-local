@@ -5,16 +5,23 @@ import SwiftUI
 /// throughout. Keeping these in one place is what makes the UI read as one
 /// system.
 enum Theme {
-    static let violet = Color(red: 0.42, green: 0.25, blue: 0.86)
-    static let cyan = Color(red: 0.13, green: 0.80, blue: 0.93)
-    static let live = Color(red: 0.20, green: 0.82, blue: 0.51)
+    // A dark, "lerd"-style palette: a coral/orange accent (the primary/`violet`
+    // token — name kept so existing call sites keep working), warm secondary,
+    // and a bright status green. The app runs in dark mode.
+    static let violet = Color(red: 0.95, green: 0.35, blue: 0.22)   // accent (coral/orange)
+    static let cyan = Color(red: 0.98, green: 0.55, blue: 0.27)     // warm secondary
+    static let live = Color(red: 0.28, green: 0.86, blue: 0.55)     // status green
 
     /// The signature diagonal gradient (icon, accents, primary buttons).
     static let brand = LinearGradient(
-        colors: [violet, cyan],
+        colors: [Color(red: 0.96, green: 0.30, blue: 0.20), Color(red: 0.98, green: 0.50, blue: 0.22)],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
+
+    /// Card fill + border tuned for the dark UI.
+    static let card = Color(red: 0.11, green: 0.11, blue: 0.12)
+    static let hairline = Color.white.opacity(0.08)
 
     static let cardRadius: CGFloat = 12
     static let tileRadius: CGFloat = 9

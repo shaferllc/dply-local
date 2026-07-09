@@ -14,7 +14,7 @@ struct InstallEngineSheet: View {
     @State private var finished = false
     @State private var process: Process?
 
-    private let engines = ["postgres", "mysql", "mariadb", "redis"]
+    private let engines = ["postgres", "mysql", "mariadb", "redis", "meilisearch", "mongodb", "minio", "stripe-mock"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

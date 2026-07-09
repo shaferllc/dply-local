@@ -8,29 +8,37 @@ struct DumpsListView: View {
     @Binding var selection: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            filterBar
-            Divider()
-            if store.filteredDumps.isEmpty {
-                ContentUnavailableView(
-                    "No dumps yet",
-                    systemImage: "ladybug",
-                    description: Text("Call `dumps($var)` in any served .test site (composer require shaferllc/dumps). It just works — no config.")
-                )
-            } else {
-                ScrollViewReader { proxy in
-                    List(selection: $selection) {
-                        ForEach(store.filteredDumps) { dump in
-                            DumpRow(dump: dump).tag(String(dump.id))
-                        }
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    filterBar
+                    Divider()
+                }
+                .background(.bar)
+            }
+            .task { store.startDumpsStream() }
+    }
+
+    @ViewBuilder private var content: some View {
+        if store.filteredDumps.isEmpty {
+            ContentUnavailableView(
+                "No dumps yet",
+                systemImage: "ladybug",
+                description: Text("Call `dumps($var)` in any served .test site (composer require shaferllc/dumps). It just works — no config.")
+            )
+        } else {
+            ScrollViewReader { proxy in
+                List(selection: $selection) {
+                    ForEach(store.filteredDumps) { dump in
+                        DumpRow(dump: dump).tag(String(dump.id))
                     }
-                    .onChange(of: store.dumps.count) {
-                        if let last = store.filteredDumps.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
-                    }
+                }
+                .onChange(of: store.dumps.count) {
+                    if let last = store.filteredDumps.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
                 }
             }
         }
-        .task { store.startDumpsStream() }
     }
 
     private var filterBar: some View {
@@ -39,7 +47,7 @@ struct DumpsListView: View {
                 Text("All sites").tag(String?.none)
                 ForEach(store.dumpSites, id: \.self) { Text($0).tag(String?.some($0)) }
             }
-            .labelsHidden().frame(maxWidth: 150)
+            .labelsHidden().fixedSize()
             Picker("", selection: $store.dumpTypeFilter) {
                 Text("All types").tag(String?.none)
                 Text("Dumps").tag(String?.some("dump"))
@@ -52,18 +60,20 @@ struct DumpsListView: View {
                 Text("Gates").tag(String?.some("gate"))
                 Text("Livewire").tag(String?.some("livewire"))
             }
-            .labelsHidden().frame(maxWidth: 110)
+            .labelsHidden().fixedSize()
             if !store.dumpScreens.isEmpty {
                 Picker("", selection: $store.dumpScreenFilter) {
                     Text("All screens").tag(String?.none)
                     ForEach(store.dumpScreens, id: \.self) { Text($0).tag(String?.some($0)) }
                 }
-                .labelsHidden().frame(maxWidth: 120)
+                .labelsHidden().fixedSize()
             }
+            Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.tertiary)
             TextField("Filter…", text: $store.dumpSearch)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
         }
-        .padding(8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
     }
 }
 

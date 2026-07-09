@@ -36,6 +36,16 @@ struct DplyLocalApp: App {
             SettingsView()
                 .environmentObject(store)
         }
+
+        // PhpMon-style status-bar item: shows the default PHP version, with a
+        // menu to switch PHP, manage sites/services, and open the app.
+        MenuBarExtra {
+            MenuBarContent().environmentObject(store)
+        } label: {
+            // Show the active PHP version in the status bar (PhpMon-style).
+            Text(store.defaultPhp.map { "php \($0)" } ?? "php")
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
 
@@ -49,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        // Keep running in the menu bar after the window is closed.
+        false
     }
 }

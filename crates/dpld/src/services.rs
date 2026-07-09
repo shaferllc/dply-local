@@ -26,6 +26,10 @@ pub enum Engine {
     Redis,
     Mysql,
     Postgres,
+    Meilisearch,
+    Mongodb,
+    Minio,
+    StripeMock,
 }
 
 impl Engine {
@@ -34,6 +38,10 @@ impl Engine {
             Engine::Redis => "redis",
             Engine::Mysql => "mysql",
             Engine::Postgres => "postgres",
+            Engine::Meilisearch => "meilisearch",
+            Engine::Mongodb => "mongodb",
+            Engine::Minio => "minio",
+            Engine::StripeMock => "stripe-mock",
         }
     }
     fn default_port(&self) -> u16 {
@@ -41,6 +49,10 @@ impl Engine {
             Engine::Redis => 6379,
             Engine::Mysql => 3306,
             Engine::Postgres => 5432,
+            Engine::Meilisearch => 7700,
+            Engine::Mongodb => 27017,
+            Engine::Minio => 9000,
+            Engine::StripeMock => 12111,
         }
     }
     fn server_name(&self) -> &'static [&'static str] {
@@ -48,6 +60,10 @@ impl Engine {
             Engine::Redis => &["redis-server"],
             Engine::Mysql => &["mariadbd", "mysqld"],
             Engine::Postgres => &["postgres"],
+            Engine::Meilisearch => &["meilisearch"],
+            Engine::Mongodb => &["mongod"],
+            Engine::Minio => &["minio"],
+            Engine::StripeMock => &["stripe-mock"],
         }
     }
     fn from_name(s: &str) -> Option<Engine> {
@@ -55,10 +71,21 @@ impl Engine {
             "redis" => Some(Engine::Redis),
             "mysql" | "mariadb" => Some(Engine::Mysql),
             "postgres" | "postgresql" | "pg" => Some(Engine::Postgres),
+            "meilisearch" | "meili" => Some(Engine::Meilisearch),
+            "mongodb" | "mongo" => Some(Engine::Mongodb),
+            "minio" | "s3" | "rustfs" => Some(Engine::Minio),
+            "stripe-mock" | "stripemock" | "stripe" => Some(Engine::StripeMock),
             _ => None,
         }
     }
-    const ALL: [Engine; 3] = [Engine::Redis, Engine::Mysql, Engine::Postgres];
+    /// SQL engines that support the `db` sub-commands.
+    fn has_databases(&self) -> bool {
+        matches!(self, Engine::Mysql | Engine::Postgres)
+    }
+    const ALL: [Engine; 7] = [
+        Engine::Redis, Engine::Mysql, Engine::Postgres,
+        Engine::Meilisearch, Engine::Mongodb, Engine::Minio, Engine::StripeMock,
+    ];
 }
 
 pub struct Services {
@@ -286,6 +313,9 @@ impl Services {
     pub fn db(&self, action: &str, engine: &str, name: Option<&str>, port: Option<u16>, file: Option<&str>) -> Result<String> {
         let e = Engine::from_name(engine)
             .with_context(|| format!("db engine must be mysql or postgres, got {engine}"))?;
+        if !e.has_databases() {
+            bail!("`db` commands apply to mysql/postgres only, not {engine}");
+        }
         let port = port.unwrap_or_else(|| e.default_port());
         if !port_open(port) {
             bail!("nothing is listening on {engine} port {port} — start it (or DBngin) first.");
@@ -318,6 +348,10 @@ fn engine_bin_dirs(engine: Engine) -> Vec<PathBuf> {
         Engine::Redis => dir.starts_with("redis") && dir != "redis-cli",
         Engine::Mysql => dir.starts_with("mariadb") || (dir.starts_with("mysql") && !dir.contains("client")),
         Engine::Postgres => dir.starts_with("postgresql"),
+        Engine::Meilisearch => dir == "meilisearch",
+        Engine::Mongodb => dir.starts_with("mongodb") && !dir.contains("database-tools"),
+        Engine::Minio => dir == "minio",
+        Engine::StripeMock => dir == "stripe-mock",
     };
     for prefix in ["/opt/homebrew/opt", "/usr/local/opt"] {
         if let Ok(entries) = std::fs::read_dir(prefix) {
@@ -336,6 +370,8 @@ fn engine_bin_dirs(engine: Engine) -> Vec<PathBuf> {
         Engine::Redis => &["redis"],
         Engine::Mysql => &["mysql", "mariadb"],
         Engine::Postgres => &["postgresql"],
+        // Not bundled by DBngin.
+        Engine::Meilisearch | Engine::Mongodb | Engine::Minio | Engine::StripeMock => &[],
     };
     for sub in dbngin_subs {
         let base = PathBuf::from("/Users/Shared/DBngin").join(sub);
@@ -382,7 +418,8 @@ fn init_instance(engine: Engine, bin_dir: &Path, data: &Path) -> Result<()> {
         return Ok(());
     }
     match engine {
-        Engine::Redis => Ok(()),
+        // These just need their (already-created) data dir.
+        Engine::Redis | Engine::Meilisearch | Engine::Mongodb | Engine::Minio | Engine::StripeMock => Ok(()),
         Engine::Postgres => {
             let initdb = bin_dir.join("initdb");
             run(&initdb, &["-D", &data.to_string_lossy(), "-U", "postgres", "--auth=trust", "-E", "UTF8"])
@@ -422,6 +459,21 @@ fn spawn_server(engine: Engine, bin_dir: &Path, data: &Path, port: u16, name: &s
                 .arg(format!("--socket={}/mysql.sock", data.display()))
                 .arg(format!("--pid-file={}/mysqld.pid", data.display()));
         }
+        Engine::Meilisearch => {
+            cmd.args(["--http-addr", &format!("127.0.0.1:{port}"), "--no-analytics", "--env", "development", "--db-path"]).arg(data);
+        }
+        Engine::Mongodb => {
+            cmd.args(["--dbpath", &data.to_string_lossy(), "--port", &port.to_string(), "--bind_ip", "127.0.0.1"]);
+        }
+        Engine::Minio => {
+            // S3-compatible object store; console picks an ephemeral port.
+            cmd.env("MINIO_ROOT_USER", "minioadmin")
+                .env("MINIO_ROOT_PASSWORD", "minioadmin")
+                .args(["server", &data.to_string_lossy(), "--address", &format!("127.0.0.1:{port}")]);
+        }
+        Engine::StripeMock => {
+            cmd.args(["-http-port", &port.to_string()]);
+        }
     }
     cmd.stdout(std::process::Stdio::from(log))
         .stderr(errlog.map(std::process::Stdio::from).unwrap_or_else(|| std::process::Stdio::null()))
@@ -454,7 +506,7 @@ fn db_list(engine: Engine, port: u16) -> Result<String> {
             let mysql = client(engine, "mysql")?;
             output(&mysql, &["-h", "127.0.0.1", "-P", &port.to_string(), "-uroot", "-N", "-e", "SHOW DATABASES"])
         }
-        Engine::Redis => bail!("redis has no databases; use redis-cli"),
+        _ => bail!("this service has no SQL databases"),
     }
 }
 
@@ -469,7 +521,7 @@ fn db_create(engine: Engine, port: u16, name: &str) -> Result<String> {
             let mysql = client(engine, "mysql")?;
             run(&mysql, &["-h", "127.0.0.1", "-P", &port.to_string(), "-uroot", "-e", &format!("CREATE DATABASE `{name}`")])?;
         }
-        Engine::Redis => bail!("redis has no databases"),
+        _ => bail!("this service has no SQL databases"),
     }
     Ok(format!("Created database `{name}`."))
 }
@@ -485,7 +537,7 @@ fn db_drop(engine: Engine, port: u16, name: &str) -> Result<String> {
             let mysql = client(engine, "mysql")?;
             run(&mysql, &["-h", "127.0.0.1", "-P", &port.to_string(), "-uroot", "-e", &format!("DROP DATABASE IF EXISTS `{name}`")])?;
         }
-        Engine::Redis => bail!("redis has no databases"),
+        _ => bail!("this service has no SQL databases"),
     }
     Ok(format!("Dropped database `{name}`."))
 }
@@ -509,7 +561,7 @@ fn db_backup(engine: Engine, port: u16, db: &str, file: Option<&str>) -> Result<
         Engine::Mysql => ("mysqldump", vec![
             "-h".into(), "127.0.0.1".into(), "-P".into(), port.to_string(),
             "-uroot".into(), db.into()]),
-        Engine::Redis => bail!("redis backup not supported here"),
+        _ => bail!("backup not supported for this service"),
     };
     let bin = client(engine, tool)?;
     let dump = std::process::Command::new(&bin)
@@ -537,7 +589,7 @@ fn db_restore(engine: Engine, port: u16, db: &str, file: &str) -> Result<String>
         Engine::Mysql => ("mysql", vec![
             "-h".into(), "127.0.0.1".into(), "-P".into(), port.to_string(),
             "-uroot".into(), db.into()]),
-        Engine::Redis => bail!("redis restore not supported here"),
+        _ => bail!("restore not supported for this service"),
     };
     let bin = client(engine, tool)?;
     let mut child = std::process::Command::new(&bin)

@@ -5,6 +5,7 @@
 //! backends. Later phases attach DNS, HTTPS, multi-PHP, and DB services to this
 //! same process.
 
+mod appserver;
 mod ca;
 mod dns;
 mod dumps;
@@ -46,6 +47,10 @@ fn main() -> anyhow::Result<()> {
                  redirect :80/:443, then browse http://<name>.test with no port."
             );
         }
+
+        // Reap php-fpm masters leaked by a previous (SIGKILLed) daemon before
+        // we spawn fresh ones, so they don't accumulate across restarts.
+        fpm::FpmManager::kill_orphans();
 
         // Build the site registry and start backends for the saved config.
         let mut registry = registry::Registry::load().context("loading registry")?;

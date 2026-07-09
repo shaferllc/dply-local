@@ -30,9 +30,18 @@ pub struct LocalConfig {
     pub parked: Vec<PathBuf>,
     /// Explicitly linked projects, keyed by site name.
     pub links: BTreeMap<String, Link>,
+    /// Reverse proxies: site name → target base URL (e.g. `blog` →
+    /// `http://localhost:3000`). Requests to `<name>.<tld>` are forwarded to
+    /// the target instead of being served from disk.
+    pub proxies: BTreeMap<String, String>,
     /// Default PHP version applied to sites with no explicit override
     /// (e.g. `"8.4"`). `None` means "use whatever `php` is on PATH".
     pub default_php: Option<String>,
+    /// How `.test` names resolve: `"resolver"` (default — a wildcard
+    /// `/etc/resolver` entry pointing at dpl's DNS) or `"hosts"` (per-site
+    /// `/etc/hosts` entries, which keep iCloud Private Relay working since no
+    /// local DNS proxy is involved).
+    pub resolution: Option<String>,
 }
 
 impl LocalConfig {
@@ -48,6 +57,12 @@ impl LocalConfig {
     /// The primary TLD used to build canonical site URLs.
     pub fn primary_tld(&self) -> String {
         self.tlds.first().cloned().unwrap_or_else(|| SITE_TLD.to_string())
+    }
+
+    /// True when `.test` names are resolved via `/etc/hosts` entries rather than
+    /// a local DNS resolver (keeps iCloud Private Relay working).
+    pub fn uses_hosts(&self) -> bool {
+        self.resolution.as_deref() == Some("hosts")
     }
 }
 
@@ -108,6 +123,12 @@ pub struct Link {
     /// Whether this site is served over HTTPS (Phase 4).
     #[serde(default)]
     pub secure: bool,
+    /// Application-server runtime: `None`/`"fpm"` = php-fpm (default), or a
+    /// Laravel Octane server: `"octane-swoole"`, `"octane-roadrunner"`,
+    /// `"octane-frankenphp"`. Non-fpm runtimes are supervised by the daemon and
+    /// reverse-proxied instead of served over FastCGI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 impl LocalConfig {

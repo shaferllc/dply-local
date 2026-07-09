@@ -83,8 +83,12 @@ struct ServicesListView: View {
     private func icon(_ engine: String) -> String {
         switch engine {
         case "redis": return "bolt.fill"
-        case "mysql": return "cylinder.split.1x2.fill"
+        case "mysql", "mariadb": return "cylinder.split.1x2.fill"
         case "postgres": return "cylinder.fill"
+        case "meilisearch": return "magnifyingglass.circle.fill"
+        case "mongodb": return "leaf.fill"
+        case "minio": return "externaldrive.fill"
+        case "stripe-mock": return "creditcard.fill"
         default: return "cylinder"
         }
     }
@@ -100,7 +104,7 @@ struct CreateInstanceSheet: View {
     @State private var name = ""
     @State private var port = ""
 
-    private let engines = ["postgres", "mysql", "redis"]
+    private let engines = ["postgres", "mysql", "redis", "meilisearch", "mongodb", "minio", "stripe-mock"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {

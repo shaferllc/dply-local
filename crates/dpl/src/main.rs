@@ -2,6 +2,7 @@
 //! either round-trips a control verb to the `dpld` daemon or dispatches into
 //! the `dpl dply …` platform commands.
 
+mod checks;
 mod cli;
 mod commands;
 mod daemon;
@@ -42,7 +43,32 @@ fn run() -> Result<()> {
         Command::Secure { name } => commands::local::secure(home.as_deref(), name, true),
         Command::Unsecure { name } => commands::local::secure(home.as_deref(), name, false),
         Command::Open { name } => commands::local::open(home.as_deref(), name),
-        Command::Php => commands::local::php_list(args.json),
+        Command::Proxy { name, target } => commands::local::proxy_set(home.as_deref(), name, target),
+        Command::Unproxy { name } => commands::local::proxy_remove(home.as_deref(), name),
+        Command::Proxies => commands::local::proxies(home.as_deref(), args.json),
+        Command::Php { cmd } => match cmd {
+            None => commands::local::php_list_home(home.as_deref(), args.json),
+            Some(cli::PhpCmd::Available) => commands::local::php_available(args.json),
+            Some(cli::PhpCmd::Install { version }) => commands::local::php_install(&version),
+            Some(cli::PhpCmd::Upgrade { version }) => commands::local::php_upgrade(&version),
+            Some(cli::PhpCmd::Uninstall { version }) => commands::local::php_uninstall(&version),
+            Some(cli::PhpCmd::Repair { version }) => commands::local::php_repair(&version),
+            Some(cli::PhpCmd::Fix { version }) => commands::local::php_fix(&version),
+            Some(cli::PhpCmd::ExtAvailable { version }) => commands::local::php_ext_available(&version, args.json),
+            Some(cli::PhpCmd::ExtInstall { version, name }) => commands::local::php_ext_install(&version, &name),
+            Some(cli::PhpCmd::ExtUninstall { version, name }) => commands::local::php_ext_uninstall(&version, &name),
+        },
+        Command::Valet { cmd } => match cmd {
+            cli::ValetCmd::List => commands::valet::list(args.json),
+            cli::ValetCmd::Import { links_only, parks_only, match_tld, manifest } => {
+                let parks = !links_only;
+                let links = !parks_only;
+                commands::valet::import(home.as_deref(), parks, links, match_tld, manifest.as_deref())
+            }
+            cli::ValetCmd::Remove { manifest } => {
+                commands::valet::remove(home.as_deref(), manifest.as_deref())
+            }
+        },
         Command::Use { version, name, default } => {
             commands::local::use_php(home.as_deref(), version, name, default)
         }
@@ -50,10 +76,22 @@ fn run() -> Result<()> {
             commands::local::logs(home.as_deref(), name, lines, follow)
         }
         Command::Share { name } => commands::local::share(home.as_deref(), name),
+        Command::Start => commands::daemon::manage(home.as_deref(), "start".into()),
+        Command::Stop => commands::daemon::manage(home.as_deref(), "stop".into()),
+        Command::Reload => commands::local::restart(home.as_deref()),
         Command::Restart => commands::local::restart(home.as_deref()),
+        Command::Repair => commands::local::repair_backends(home.as_deref()),
         Command::Paths => commands::local::paths(home.as_deref()),
-        Command::Doctor => commands::local::doctor(home.as_deref()),
+        Command::Doctor => commands::doctor::run(home.as_deref(), args.json),
+        Command::Parity { site, remote } => {
+            commands::parity::run(home.as_deref(), args.host.as_deref(), site, remote, args.json)
+        }
         Command::Setup { no_ports } => commands::local::setup(home.as_deref(), !no_ports),
+        Command::Runtime { site, runtime } => commands::local::set_runtime(home.as_deref(), site, runtime),
+        Command::Octane { site, server } => commands::local::octane_setup(home.as_deref(), &site, &server),
+        Command::Resolution { mode } => commands::local::resolution(home.as_deref(), mode),
+        Command::Takeover => commands::local::takeover(home.as_deref()),
+        Command::Untakeover => commands::local::untakeover(home.as_deref()),
         Command::Unsetup => commands::local::unsetup(home.as_deref()),
         Command::Trust => commands::local::trust(home.as_deref(), true),
         Command::Untrust => commands::local::trust(home.as_deref(), false),

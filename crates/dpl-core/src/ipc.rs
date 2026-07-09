@@ -52,12 +52,26 @@ pub enum Request {
     Link { name: Option<String>, path: String },
     /// Remove a linked site by name.
     Unlink { name: String },
+    /// Bulk import parked dirs + named links (one save/reconcile). Links are
+    /// `(name, path)` pairs.
+    ImportSites { parked: Vec<String>, links: Vec<(String, String)> },
+    /// Bulk remove parked dirs + links (by name), one save/reconcile.
+    RemoveSites { parked: Vec<String>, links: Vec<String> },
+    /// Switch `.test` resolution between `"resolver"` and `"hosts"`.
+    SetResolution { mode: String },
+    /// Set a linked site's runtime: `fpm` | `octane-swoole` |
+    /// `octane-roadrunner` | `octane-frankenphp`.
+    SetRuntime { site: String, runtime: String },
     /// Toggle HTTPS for a site (Phase 4 — accepted now, enforced later).
     Secure { name: String, secure: bool },
+    /// Manage reverse proxies. `action` ∈ set|remove (list is via ListSites).
+    Proxy { action: String, name: String, target: Option<String> },
     /// Pin a PHP version for a site (or set the default when `site` is None).
     UsePhp { version: String, site: Option<String> },
     /// Re-read the config from disk and reconcile backends.
     Reload,
+    /// Hard-reset all backends: stop + reap all php-fpm/Octane servers, rebuild.
+    RepairBackends,
     /// Manage database/cache services and instances.
     /// `action` ∈ list|versions|create|start|stop|restart|delete.
     Service {
@@ -154,6 +168,15 @@ pub struct SiteInfo {
     /// True when a PHP backend is currently running for this site.
     #[serde(default)]
     pub serving: bool,
+    /// Runtime: `None`/`"fpm"` = php-fpm, else an Octane server.
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// Detected project type, e.g. `"Laravel (^12)"`, `"Symfony"`, `"WordPress"`.
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// PHP version the project requires (composer.json `require.php`, e.g. `"^8.3"`).
+    #[serde(default)]
+    pub requires_php: Option<String>,
 }
 
 /// One local database/cache service.

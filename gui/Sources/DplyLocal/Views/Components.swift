@@ -69,6 +69,50 @@ struct ItemRow: View {
     }
 }
 
+/// A rich domain-list row (PhpMon-style): TLS state, host, detected project
+/// type + PHP version, and whether it's serving. Used for local `.test` sites.
+struct DomainRow: View {
+    let site: Row
+
+    var body: some View {
+        let secure = site.dig("secure") == .bool(true)
+        let serving = site.dig("serving") == .bool(true)
+        let isProxy = site.cell(["source"]) == "proxy"
+        let php = site.cell(["php"])
+        let framework = site.cell(["framework"])
+        let runtime = site.cell(["runtime"])
+
+        HStack(spacing: 10) {
+            Image(systemName: secure ? "lock.fill" : "lock.open")
+                .font(.caption2)
+                .foregroundStyle(secure ? AnyShapeStyle(.green) : AnyShapeStyle(.tertiary))
+                .frame(width: 12)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(site.cell(["host"])).font(.body.weight(.semibold)).lineLimit(1)
+                Text(subtitle(isProxy: isProxy, framework: framework, php: php, runtime: runtime))
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+            }
+            Spacer(minLength: 6)
+            Image(systemName: isProxy ? "arrow.triangle.branch" : "link")
+                .font(.caption2).foregroundStyle(.tertiary)
+            Circle().fill(serving ? Color.green : Color.secondary.opacity(0.4)).frame(width: 7, height: 7)
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func subtitle(isProxy: Bool, framework: String, php: String, runtime: String) -> String {
+        if isProxy { return "proxy → \(site.cell(["path"]))" }
+        var parts: [String] = []
+        if !framework.isEmpty { parts.append(framework) }
+        parts.append(php.isEmpty ? "PHP default" : "PHP \(php)")
+        if !runtime.isEmpty && runtime != "fpm" {
+            parts.append(runtime.replacingOccurrences(of: "octane-", with: "⚡"))
+        }
+        return parts.joined(separator: "  ·  ")
+    }
+}
+
 /// A labeled key/value list rendered from a Row and a column spec, skipping
 /// empty values.
 struct KeyValueView: View {

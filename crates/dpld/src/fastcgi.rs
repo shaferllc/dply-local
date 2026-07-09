@@ -35,8 +35,11 @@ pub async fn request(
     params: &[(String, String)],
     body: &[u8],
 ) -> Result<FcgiResponse> {
-    let mut stream = TcpStream::connect(addr)
+    // Bounded connect: a wedged php-fpm master must not hang the request
+    // forever (a truly dead port refuses fast; a stuck one would hang).
+    let mut stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(addr))
         .await
+        .map_err(|_| anyhow::anyhow!("timed out connecting to php-fpm at {addr}"))?
         .with_context(|| format!("connecting to php-fpm at {addr}"))?;
 
     // BEGIN_REQUEST: role=RESPONDER, flags=0 (close after request).

@@ -32,6 +32,22 @@ impl FpmManager {
         self.masters.len()
     }
 
+    /// Kill php-fpm masters left over from a previous daemon. `kill_on_drop`
+    /// doesn't fire when launchd SIGKILLs the daemon, so masters accumulate
+    /// across restarts (each holds a pool and leaks). Call once at startup,
+    /// before the first reconcile, so we start from a clean slate.
+    pub fn kill_orphans() {
+        // Match only our own pool configs under ~/.dpl/php/ — never Valet's or
+        // the user's other php-fpm instances.
+        if let Ok(dir) = dpl_core::paths::dpl_dir(None) {
+            let pattern = dir.join("php").display().to_string();
+            let _ = std::process::Command::new("pkill")
+                .arg("-f")
+                .arg(&pattern)
+                .status();
+        }
+    }
+
     /// The FastCGI address for a PHP binary, if its master is running.
     pub fn addr_for(&self, php_bin: &Path) -> Option<SocketAddr> {
         self.masters
@@ -124,10 +140,12 @@ fn write_conf(php_bin: &Path, port: u16) -> Result<PathBuf> {
          \n\
          [www]\n\
          listen = 127.0.0.1:{port}\n\
+         listen.backlog = 256\n\
          pm = ondemand\n\
-         pm.max_children = 20\n\
-         pm.process_idle_timeout = 10s\n\
+         pm.max_children = 40\n\
+         pm.process_idle_timeout = 30s\n\
          pm.max_requests = 500\n\
+         request_terminate_timeout = 90s\n\
          catch_workers_output = yes\n\
          clear_env = no\n",
         log = log.display(),

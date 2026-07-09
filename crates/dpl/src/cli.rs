@@ -85,8 +85,25 @@ pub enum Command {
         /// Site name (default: current directory's name).
         name: Option<String>,
     },
-    /// List installed PHP versions.
-    Php,
+    /// Proxy a `.test` host to another local service (Docker, Vite, a port…).
+    Proxy {
+        /// Host name, e.g. `blog` or `blog.test`.
+        name: String,
+        /// Target URL, e.g. `http://localhost:3000` (scheme optional).
+        target: String,
+    },
+    /// Remove a reverse proxy.
+    Unproxy {
+        /// Host name.
+        name: String,
+    },
+    /// List reverse proxies.
+    Proxies,
+    /// List installed PHP versions, or manage them (install/uninstall/repair).
+    Php {
+        #[command(subcommand)]
+        cmd: Option<PhpCmd>,
+    },
     /// Pin a PHP version for a site (or set the default with no site).
     Use {
         /// PHP version, e.g. 8.3.
@@ -113,18 +130,60 @@ pub enum Command {
         /// Site name (default: current directory's name).
         name: Option<String>,
     },
+    /// Start the dpld daemon.
+    Start,
+    /// Stop the dpld daemon.
+    Stop,
+    /// Reload config + reconcile backends without restarting the daemon.
+    Reload,
     /// Reload the config from disk and restart backends.
     Restart,
+    /// Hard-reset all backends (stop + reap php-fpm/Octane, rebuild) — the fix
+    /// when the machine gets into a churned/wedged state.
+    Repair,
     /// Show config, socket, and data paths.
     Paths,
-    /// Check the local environment and report problems.
+    /// Check the local environment and report problems (`--json` for a report).
     Doctor,
+    /// Diff a local site against the dply site it deploys to: PHP, extensions,
+    /// env key names, branch, and document root. Never reads env values.
+    Parity {
+        /// Linked site name (default: the site linked to the current directory).
+        site: Option<String>,
+        /// dply site to compare against, when it's named differently.
+        #[arg(long)]
+        remote: Option<String>,
+    },
     /// One-time privileged setup: trust the CA, route .test, redirect :80/:443.
     Setup {
         /// Skip the :80/:443 port redirect (sites stay on :8080/:8443).
         #[arg(long)]
         no_ports: bool,
     },
+    /// Set a linked site's runtime (fpm or an already-installed Octane server).
+    Runtime {
+        /// Linked site name.
+        site: String,
+        /// fpm | octane-swoole | octane-roadrunner | octane-frankenphp.
+        runtime: String,
+    },
+    /// Install Laravel Octane in a site and switch it to that server.
+    Octane {
+        /// Linked site name (a Laravel app).
+        site: String,
+        /// Server: swoole | roadrunner | frankenphp.
+        #[arg(long, default_value = "frankenphp")]
+        server: String,
+    },
+    /// Choose how .test resolves: `hosts` (Private-Relay-safe) or `resolver`.
+    Resolution {
+        /// `hosts`, `resolver`, or omit to show the current mode.
+        mode: Option<String>,
+    },
+    /// Take over ports 80/443 from Valet/Apache so dpl serves .test (sudo).
+    Takeover,
+    /// Reverse `takeover`: restore Valet and give back ports 80/443 (sudo).
+    Untakeover,
     /// Undo `dpl setup`.
     Unsetup,
     /// Trust the local HTTPS CA in the system keychain (needs sudo).
@@ -179,12 +238,17 @@ pub enum Command {
         /// One of: install, uninstall, start, stop, restart, status.
         action: String,
     },
+    /// Import sites from an existing Laravel Valet install.
+    Valet {
+        #[command(subcommand)]
+        cmd: ValetCmd,
+    },
     /// Manage the TLDs your sites answer on (default: test).
     Tld {
-        /// One of: list, add, remove.
+        /// One of: list, add, remove, primary.
         #[arg(default_value = "list")]
         action: String,
-        /// TLD name, e.g. `localhost` (for add/remove).
+        /// TLD name, e.g. `localhost` (for add/remove/primary).
         name: Option<String>,
     },
 
@@ -205,6 +269,88 @@ pub struct LoginArgs {
     /// Don't try to open the verification URL in a browser.
     #[arg(long = "no-browser")]
     pub no_browser: bool,
+}
+
+/// Laravel Valet import operations.
+#[derive(Subcommand)]
+pub enum ValetCmd {
+    /// List the parked directories and linked sites Valet has configured.
+    List,
+    /// Import Valet's parked dirs and linked sites into dpl.
+    Import {
+        /// Only import linked sites (skip parked directories).
+        #[arg(long)]
+        links_only: bool,
+        /// Only import parked directories (skip linked sites).
+        #[arg(long)]
+        parks_only: bool,
+        /// Also adopt Valet's TLD as dpl's primary domain.
+        #[arg(long)]
+        match_tld: bool,
+        /// Import an explicit selection from a JSON manifest instead of all.
+        #[arg(long)]
+        manifest: Option<String>,
+    },
+    /// Remove imported sites (reverse of import). Without --manifest, removes
+    /// everything Valet has.
+    Remove {
+        /// Remove an explicit selection from a JSON manifest.
+        #[arg(long)]
+        manifest: Option<String>,
+    },
+}
+
+/// PHP version-manager operations (Homebrew-backed). `dpl php` with no
+/// subcommand still lists installed versions.
+#[derive(Subcommand)]
+pub enum PhpCmd {
+    /// List all installable PHP versions with their status.
+    Available,
+    /// Install a PHP version via Homebrew, e.g. `dpl php install 8.3`.
+    Install {
+        /// PHP version, e.g. 8.3.
+        version: String,
+    },
+    /// Upgrade a PHP version to the newest patch via Homebrew.
+    Upgrade {
+        /// PHP version, e.g. 8.3.
+        version: String,
+    },
+    /// Uninstall a PHP version via Homebrew.
+    Uninstall {
+        /// PHP version, e.g. 8.0.
+        version: String,
+    },
+    /// Repair a broken PHP install (reinstall keg and/or disable broken
+    /// extensions), e.g. `dpl php repair 7.4`.
+    Repair {
+        /// PHP version, e.g. 7.4.
+        version: String,
+    },
+    /// Disable extensions that fail to load (missing `.so`) without a reinstall.
+    Fix {
+        /// PHP version, e.g. 8.1.
+        version: String,
+    },
+    /// List extensions installable for a version (shivammathur/extensions tap).
+    ExtAvailable {
+        /// PHP version, e.g. 8.3.
+        version: String,
+    },
+    /// Install an extension for a version, e.g. `dpl php ext-install 8.3 swoole`.
+    ExtInstall {
+        /// PHP version, e.g. 8.3.
+        version: String,
+        /// Extension name, e.g. redis, swoole, mongodb.
+        name: String,
+    },
+    /// Uninstall an extension for a version.
+    ExtUninstall {
+        /// PHP version, e.g. 8.3.
+        version: String,
+        /// Extension name.
+        name: String,
+    },
 }
 
 /// The dply subtree. Variant names use `group:command` to match the dply CLI.

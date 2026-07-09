@@ -14,6 +14,70 @@ use std::path::{Path, PathBuf};
 
 use crate::config::LocalConfig;
 
+/// Detect a project's framework/type from its `composer.json` (or well-known
+/// files) — e.g. `Laravel (^12)`, `Symfony`, `WordPress`, `Drupal`. Returns a
+/// display string, or `None` if it doesn't look like a PHP project.
+pub fn detect_framework(project: &Path) -> Option<String> {
+    let composer = project.join("composer.json");
+    if let Ok(text) = std::fs::read_to_string(&composer) {
+        // Lightweight, dependency-free scan: find `"pkg"` then the quoted value
+        // after the following colon (its version constraint).
+        let ver = |pkg: &str| -> Option<String> {
+            let key = format!("\"{pkg}\"");
+            let after = &text[text.find(&key)? + key.len()..];
+            let rest = &after[after.find(':')? + 1..];
+            let q1 = rest.find('"')?;
+            let q2 = rest[q1 + 1..].find('"')?;
+            Some(rest[q1 + 1..=q1 + q2].to_string())
+        };
+        if let Some(v) = ver("laravel/framework") {
+            return Some(format!("Laravel ({v})"));
+        }
+        if let Some(v) = ver("symfony/framework-bundle").or_else(|| ver("symfony/symfony")) {
+            return Some(format!("Symfony ({v})"));
+        }
+        if let Some(v) = ver("tempest/framework") {
+            return Some(format!("Tempest ({v})"));
+        }
+        if ver("statamic/cms").is_some() {
+            return Some("Statamic".into());
+        }
+        if ver("craftcms/cms").is_some() {
+            return Some("Craft".into());
+        }
+        if ver("drupal/core").is_some() || ver("drupal/core-recommended").is_some() {
+            return Some("Drupal".into());
+        }
+        if ver("slim/slim").is_some() {
+            return Some("Slim".into());
+        }
+        if ver("cakephp/cakephp").is_some() {
+            return Some("CakePHP".into());
+        }
+        return Some("PHP (Composer)".into());
+    }
+    if project.join("wp-config.php").is_file() || project.join("wp-load.php").is_file() {
+        return Some("WordPress".into());
+    }
+    if project.join("index.php").is_file() {
+        return Some("PHP".into());
+    }
+    None
+}
+
+/// The PHP version constraint a project requires (composer.json `require.php`,
+/// e.g. `"^8.3"`) — used to flag PHP compatibility / suggest per-site isolation.
+pub fn detect_required_php(project: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(project.join("composer.json")).ok()?;
+    // Find the `require` block, then the `php` constraint within it.
+    let after = &text[text.find("\"require\"")?..];
+    let rest = &after[after.find("\"php\"")? + 5..];
+    let val = &rest[rest.find(':')? + 1..];
+    let q1 = val.find('"')?;
+    let q2 = val[q1 + 1..].find('"')?;
+    Some(val[q1 + 1..=q1 + q2].to_string())
+}
+
 /// A fully-resolved site ready to serve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSite {
@@ -31,6 +95,9 @@ pub struct ResolvedSite {
     pub source: SiteSource,
     /// Primary TLD for this site's canonical host/URL.
     pub tld: String,
+    /// Application-server runtime (`None`/`"fpm"` = php-fpm; else an Octane
+    /// server the daemon supervises + proxies).
+    pub runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +166,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
             secure: link.secure,
             source: SiteSource::Linked,
             tld: tld.clone(),
+            runtime: link.runtime.clone(),
         });
     }
 
@@ -124,6 +192,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
                 secure: false,
                 source: SiteSource::Parked,
                 tld: tld.clone(),
+                runtime: None,
             });
         }
     }

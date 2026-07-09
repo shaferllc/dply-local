@@ -2,8 +2,11 @@
 //! sites; `dply` is the platform subtree.
 
 pub mod daemon;
+pub mod doctor;
 pub mod dply;
 pub mod local;
+pub mod parity;
+pub mod valet;
 
 use dpl_core::ipc::Response;
 

@@ -36,6 +36,13 @@ fn main() -> ExitCode {
             _ => Err("usage: install-portmap <http_port> <https_port>".into()),
         },
         Some("remove-portmap") => remove_portmap(),
+        Some("sync-hosts") => sync_hosts(&args[1..]),
+        Some("clear-hosts") => sync_hosts(&[]),
+        Some("install-sudoers") => match (arg(&args, 1), arg(&args, 2)) {
+            (Ok(user), Ok(helper)) => install_sudoers(&user, &helper),
+            _ => Err("usage: install-sudoers <user> <helper-path>".into()),
+        },
+        Some("remove-sudoers") => remove_sudoers(),
         Some(other) => Err(format!("unknown operation: {other}")),
         None => Err("expected an operation (this helper is invoked by `dpl`)".into()),
     };
@@ -178,6 +185,109 @@ fn install_portmap(http: &str, https: &str) -> Result<String, String> {
 #[cfg(target_os = "linux")]
 fn remove_portmap() -> Result<String, String> {
     Ok("Remove the iptables OUTPUT nat rules manually if set.".into())
+}
+
+// ---- /etc/hosts management (Private-Relay-safe alternative to a resolver) ----
+
+const HOSTS_BEGIN: &str = "# >>> dpl managed (do not edit) >>>";
+const HOSTS_END: &str = "# <<< dpl managed <<<";
+const HOSTS_PATH: &str = "/etc/hosts";
+
+/// A hostname safe to write into /etc/hosts (letters/digits/dot/hyphen only).
+fn valid_hostname(h: &str) -> Result<(), String> {
+    let ok = !h.is_empty()
+        && h.len() <= 253
+        && !h.starts_with(['.', '-'])
+        && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    if ok { Ok(()) } else { Err(format!("invalid hostname: {h}")) }
+}
+
+/// Rewrite the dpl-managed block of /etc/hosts to map exactly `hosts` →
+/// 127.0.0.1 (IPv4 only, so the browser reaches dpld's IPv4 listener). An empty
+/// list clears the block. Everything outside the markers is preserved verbatim.
+fn sync_hosts(hosts: &[String]) -> Result<String, String> {
+    for h in hosts {
+        valid_hostname(h)?;
+    }
+    let current = std::fs::read_to_string(HOSTS_PATH).map_err(|e| format!("reading {HOSTS_PATH}: {e}"))?;
+
+    // Drop any existing managed block, keep the rest.
+    let mut out = String::new();
+    let mut in_block = false;
+    for line in current.lines() {
+        match line.trim() {
+            HOSTS_BEGIN => in_block = true,
+            HOSTS_END => in_block = false,
+            _ if !in_block => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            _ => {}
+        }
+    }
+    let mut out = out.trim_end().to_string();
+    out.push('\n');
+    if !hosts.is_empty() {
+        out.push_str(HOSTS_BEGIN);
+        out.push('\n');
+        for h in hosts {
+            out.push_str("127.0.0.1\t");
+            out.push_str(h);
+            out.push('\n');
+        }
+        out.push_str(HOSTS_END);
+        out.push('\n');
+    }
+
+    // Write via a temp file + rename so /etc/hosts is never half-written.
+    let tmp = "/etc/hosts.dpl.tmp";
+    std::fs::write(tmp, &out).map_err(|e| format!("writing {tmp}: {e}"))?;
+    std::fs::rename(tmp, HOSTS_PATH).map_err(|e| format!("replacing {HOSTS_PATH}: {e}"))?;
+    Ok(format!("Synced {} host entr{} to {HOSTS_PATH}.", hosts.len(), if hosts.len() == 1 { "y" } else { "ies" }))
+}
+
+// ---- sudoers (let dpl update /etc/hosts without a password prompt) ----
+
+fn valid_user(u: &str) -> Result<(), String> {
+    let ok = !u.is_empty()
+        && u.len() <= 32
+        && u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
+    if ok { Ok(()) } else { Err(format!("invalid user: {u}")) }
+}
+
+fn install_sudoers(user: &str, helper: &str) -> Result<String, String> {
+    valid_user(user)?;
+    let path = std::path::Path::new(helper);
+    if !path.is_absolute() || !path.is_file() {
+        return Err(format!("helper path must be an absolute existing file: {helper}"));
+    }
+    if helper.contains([',', '\n', ' ', '"', '\\']) {
+        return Err("helper path contains disallowed characters".into());
+    }
+    // Only the hosts-sync operations, nothing else.
+    let content = format!(
+        "# Installed by dpl — lets dpl keep /etc/hosts in sync without a password.\n\
+         {user} ALL=(root) NOPASSWD: {helper} sync-hosts *, {helper} clear-hosts\n"
+    );
+    let dst = "/etc/sudoers.d/dpl";
+    let tmp = "/etc/sudoers.d/.dpl.tmp";
+    std::fs::write(tmp, &content).map_err(|e| format!("writing {tmp}: {e}"))?;
+    let _ = run("chmod", &["0440", tmp]);
+    // Validate before activating — a malformed sudoers file could lock out sudo.
+    match std::process::Command::new("visudo").args(["-cf", tmp]).output() {
+        Ok(o) if o.status.success() => {}
+        _ => {
+            let _ = std::fs::remove_file(tmp);
+            return Err("sudoers validation failed — not installed".into());
+        }
+    }
+    std::fs::rename(tmp, dst).map_err(|e| format!("installing {dst}: {e}"))?;
+    Ok(format!("Installed {dst} — dpl can update /etc/hosts without a password."))
+}
+
+fn remove_sudoers() -> Result<String, String> {
+    let _ = std::fs::remove_file("/etc/sudoers.d/dpl");
+    Ok("Removed /etc/sudoers.d/dpl.".into())
 }
 
 // ---- helper ----

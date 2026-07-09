@@ -100,14 +100,22 @@ fn uninstall() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn start() -> Result<()> {
-    run("launchctl", &["start", LABEL])?;
+    let path = plist_path()?;
+    // Load the agent (KeepAlive + RunAtLoad start it); if it's already loaded,
+    // kick it with `start`.
+    if run("launchctl", &["load", &path.to_string_lossy()]).is_err() {
+        let _ = run("launchctl", &["start", LABEL]);
+    }
     println!("✓ Started dpld.");
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn stop() -> Result<()> {
-    run("launchctl", &["stop", LABEL])?;
+    // The agent sets KeepAlive, so `launchctl stop` just triggers a respawn —
+    // unload the agent to actually stop it (it reloads on next login / `start`).
+    let path = plist_path()?;
+    run("launchctl", &["unload", &path.to_string_lossy()])?;
     println!("✓ Stopped dpld.");
     Ok(())
 }

@@ -7,7 +7,7 @@ use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -16,8 +16,9 @@ use hyper::body::Incoming;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper::{Request, Response, StatusCode, Uri};
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
@@ -86,16 +87,55 @@ pub(crate) async fn handle(
         .map(strip_port)
         .unwrap_or_default();
 
-    // Resolve the route while briefly holding the lock, then release it before
-    // the (awaiting) FastCGI/file work. The registry knows the configured TLDs.
-    let route = {
+    // One lock: look up both a reverse-proxy target and a servable route.
+    let (proxy, route) = {
         let reg = registry.lock().await;
-        reg.site_for_host(&host).and_then(|name| reg.resolve_request(&name))
+        match reg.site_for_host(&host) {
+            Some(name) => (reg.proxy_target(&name), reg.resolve_request(&name)),
+            None => (None, None),
+        }
     };
 
+    if let Some(target) = proxy {
+        return Ok(forward_proxy(req, &target, https).await);
+    }
     match route {
         Some(route) => Ok(serve_site(req, route, &host, server_port, https).await),
         None => Ok(fallback_index(&registry, &host).await),
+    }
+}
+
+type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Incoming>;
+static CLIENT: OnceLock<HttpClient> = OnceLock::new();
+
+fn http_client() -> &'static HttpClient {
+    CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http())
+}
+
+/// Reverse-proxy a request to another local service (`dpl proxy`). Keeps the
+/// original Host header (like Valet) and adds X-Forwarded-* hints.
+async fn forward_proxy(req: Request<Incoming>, target: &str, https: bool) -> Response<ProxyBody> {
+    let (mut parts, body) = req.into_parts();
+    let pq = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let uri: Uri = match format!("{}{pq}", target.trim_end_matches('/')).parse() {
+        Ok(u) => u,
+        Err(_) => return error_page(StatusCode::BAD_GATEWAY, "invalid proxy target"),
+    };
+    let scheme = if https { "https" } else { "http" };
+    if let Some(host) = parts.headers.get(hyper::header::HOST).cloned() {
+        parts.headers.insert("x-forwarded-host", host);
+    }
+    if let Ok(proto) = HeaderValue::from_str(scheme) {
+        parts.headers.insert("x-forwarded-proto", proto);
+    }
+    parts.uri = uri;
+
+    match http_client().request(Request::from_parts(parts, body)).await {
+        Ok(resp) => resp.map(|b| b.map_err(boxed).boxed()),
+        Err(e) => error_page(
+            StatusCode::BAD_GATEWAY,
+            &format!("proxy target {target} is unreachable ({e})"),
+        ),
     }
 }
 
@@ -107,6 +147,12 @@ async fn serve_site(
     server_port: u16,
     https: bool,
 ) -> Response<ProxyBody> {
+    // Octane runtime: the site is served by its own HTTP server on a loopback
+    // port — reverse-proxy to it rather than serving over FastCGI.
+    if let Some(port) = route.upstream {
+        return forward_proxy(req, &format!("http://127.0.0.1:{port}"), https).await;
+    }
+
     let method = req.method().clone();
     let uri = req.uri().clone();
     let path = percent_decode(uri.path());
@@ -128,11 +174,16 @@ async fn serve_site(
                 &route, host, server_port, https, &method, &uri, &query, &script,
                 &script_name, &path_info, &headers, body.len(),
             );
-            match crate::fastcgi::request(route.fpm_addr, &params, &body).await {
-                Ok(resp) => parse_cgi(&resp.stdout),
-                Err(e) => error_page(
-                    StatusCode::BAD_GATEWAY,
-                    &format!("php-fpm did not respond ({e})"),
+            // Bound the whole exchange: a request whose PHP app hangs (e.g. an
+            // unreachable DB) must not hold a worker — and the connection —
+            // forever, which would starve the pool and wedge every other site.
+            let fcgi = crate::fastcgi::request(route.fpm_addr, &params, &body);
+            match tokio::time::timeout(std::time::Duration::from_secs(60), fcgi).await {
+                Ok(Ok(resp)) => parse_cgi(&resp.stdout),
+                Ok(Err(e)) => error_page(StatusCode::BAD_GATEWAY, &format!("php-fpm did not respond ({e})")),
+                Err(_) => error_page(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "The app took too long to respond (over 60s) — check its database/services.",
                 ),
             }
         }

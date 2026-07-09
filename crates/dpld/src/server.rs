@@ -139,6 +139,18 @@ async fn dispatch(
         }
         Request::Park { path } => mutate(state, |r| r.park(&path)).await,
         Request::Unpark { path } => mutate(state, |r| r.unpark(&path)).await,
+        Request::ImportSites { parked, links } => {
+            mutate(state, |r| r.import_sites(&parked, &links)).await
+        }
+        Request::RemoveSites { parked, links } => {
+            mutate(state, |r| r.remove_sites(&parked, &links)).await
+        }
+        Request::SetResolution { mode } => {
+            mutate(state, |r| r.set_resolution(&mode)).await
+        }
+        Request::SetRuntime { site, runtime } => {
+            mutate(state, |r| r.set_runtime(&site, &runtime)).await
+        }
         Request::Link { name, path } => {
             mutate(state, |r| r.link(name.as_deref(), &path)).await
         }
@@ -146,10 +158,19 @@ async fn dispatch(
         Request::Secure { name, secure } => {
             mutate(state, |r| r.set_secure(&name, secure)).await
         }
+        Request::Proxy { action, name, target } => match action.as_str() {
+            "set" => match target {
+                Some(t) => mutate(state, |r| r.proxy_set(&name, &t)).await,
+                None => Response::Error { message: "usage: dpl proxy <host> <target>".into() },
+            },
+            "remove" => mutate(state, |r| r.proxy_remove(&name)).await,
+            other => Response::Error { message: format!("unknown proxy action: {other}") },
+        },
         Request::UsePhp { version, site } => {
             mutate(state, |r| r.use_php(&version, site.as_deref())).await
         }
         Request::Reload => mutate(state, |r| r.reload()).await,
+        Request::RepairBackends => mutate(state, |r| r.repair_backends()).await,
         Request::Tld { action, name } => {
             let mut reg = state.registry.lock().await;
             match action.as_str() {
@@ -161,6 +182,10 @@ async fn dispatch(
                 "remove" => match name {
                     Some(t) => svc_result(Some(reg.tld_remove(&t))),
                     None => Response::Error { message: "usage: dpl tld remove <name>".into() },
+                },
+                "primary" => match name {
+                    Some(t) => svc_result(Some(reg.tld_primary(&t))),
+                    None => Response::Error { message: "usage: dpl tld primary <name>".into() },
                 },
                 other => Response::Error { message: format!("unknown tld action: {other}") },
             }
