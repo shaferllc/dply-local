@@ -59,6 +59,17 @@ enum JSONValue: Decodable, Hashable {
         return nil
     }
 
+    var boolValue: Bool? {
+        if case .bool(let b) = self { return b }
+        return nil
+    }
+
+    /// JSON has one number type, so an integer field decodes as `.number`.
+    var intValue: Int? {
+        if case .number(let n) = self { return Int(n) }
+        return nil
+    }
+
     var isEmpty: Bool {
         switch self {
         case .null: return true

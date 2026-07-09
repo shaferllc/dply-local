@@ -11,7 +11,7 @@ struct ExtensionsPage: View {
     @State private var available: [String] = []
     @State private var opcache = OpcacheConfig()
     @State private var draft = OpcacheConfig()
-    @State private var xdebug = XdebugConfig()
+    @State private var xdebugInstalled = false
     @State private var search = ""
     @State private var loading = true
     @State private var loadingAvailable = false
@@ -173,69 +173,59 @@ struct ExtensionsPage: View {
 
     // MARK: Xdebug
 
+    /// Xdebug is installed *per PHP version* but its mode is chosen *per site*,
+    /// so this panel covers only what belongs to the version: whether the
+    /// extension is there, and the IDE settings every site shares. Mode lives in
+    /// each site's detail view.
     @ViewBuilder
     private func xdebugPanel(_ install: PhpInstall) -> some View {
         DetailSection(title: "Xdebug") {
-            if !xdebug.loaded {
+            if !xdebugInstalled {
                 VStack(alignment: .leading, spacing: 8) {
-                    if xdebug.disabledButInstalled {
-                        Text("Installed for PHP \(install.version) but not enabled (its load line is commented out).")
-                            .font(.callout).foregroundStyle(.secondary)
-                        Button { apply(mode: "debug", ideKey: xdebug.ideKey, port: xdebug.clientPort, install: install) } label: {
-                            Label("Enable Xdebug", systemImage: "power")
-                        }
-                        .buttonStyle(.borderedProminent).tint(Theme.violet).disabled(busy)
-                    } else {
-                        Text("Not installed for PHP \(install.version).")
-                            .font(.callout).foregroundStyle(.secondary)
-                        Button { installExt = .extInstall(install.version, "xdebug") } label: {
-                            Label("Install Xdebug", systemImage: "arrow.down.circle")
-                        }
-                        .buttonStyle(.borderedProminent).tint(Theme.violet).disabled(busy)
+                    Text("Not installed for PHP \(install.version).")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button { installExt = .extInstall(install.version, "xdebug") } label: {
+                        Label("Install Xdebug", systemImage: "arrow.down.circle")
                     }
+                    .buttonStyle(.borderedProminent).tint(Theme.violet).disabled(busy)
                 }
             } else {
                 VStack(alignment: .leading, spacing: 12) {
-                    Picker("", selection: Binding(get: { xdebugMode }, set: { apply(mode: $0, ideKey: xdebug.ideKey, port: xdebug.clientPort, install: install) })) {
-                        Text("Off").tag("off")
-                        Text("Step Debug").tag("debug")
-                        Text("Develop").tag("develop")
-                    }
-                    .pickerStyle(.segmented).labelsHidden().disabled(busy)
+                    Text("Installed for PHP \(install.version). Turn it on for a site from that site's page — each site runs on its own pool, so debugging one leaves the others at full speed.")
+                        .font(.callout).foregroundStyle(.secondary)
 
-                    if xdebug.stepDebug {
-                        Text("Set your IDE to listen on **127.0.0.1:\(xdebug.clientPort)** (IDE key `\(xdebug.ideKey)`), set a breakpoint, and reload the site.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else if xdebug.mode == "off" {
-                        Text("Off — no overhead. Switch to Step Debug when you need breakpoints.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text("Develop mode: better error messages and var_dump output, no step debugging.")
-                            .font(.caption).foregroundStyle(.secondary)
+                    let active = store.xdebug.active.filter { $0.php == install.version || $0.php == nil }
+                    if !active.isEmpty {
+                        Text("Debugging: \(active.map(\.name).joined(separator: ", "))")
+                            .font(.caption).foregroundStyle(Theme.violet)
                     }
+
+                    Divider()
 
                     HStack(spacing: 16) {
                         Picker("IDE", selection: Binding(
-                            get: { xdebug.ideKey },
-                            set: { apply(mode: xdebug.mode == "off" ? "debug" : xdebug.mode, ideKey: $0, port: xdebug.clientPort, install: install) })) {
+                            get: { store.xdebug.ideKey },
+                            set: { key in Task { busy = true; await store.setXdebugIdeKey(key); busy = false } })) {
                             Text("PhpStorm").tag("PHPSTORM")
                             Text("VS Code").tag("VSCODE")
                         }
                         .fixedSize().disabled(busy)
-                        Text("Port \(xdebug.clientPort)").font(.caption).foregroundStyle(.secondary)
+
+                        Text("Port")
+                        TextField("", value: Binding(
+                            get: { store.xdebug.clientPort },
+                            set: { p in Task { busy = true; await store.setXdebugPort(p); busy = false } }),
+                            format: .number.grouping(.never))
+                            .frame(width: 64).disabled(busy)
                         Spacer()
                     }
                     .font(.callout)
+
+                    Text("Your IDE should listen on 127.0.0.1:\(store.xdebug.clientPort) with IDE key `\(store.xdebug.ideKey)`.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
-    }
-
-    /// The segmented control's selection, derived from the loaded config.
-    private var xdebugMode: String {
-        if xdebug.stepDebug { return "debug" }
-        if xdebug.develop { return "develop" }
-        return "off"
     }
 
     // MARK: Installed extensions
@@ -345,7 +335,8 @@ struct ExtensionsPage: View {
         exts = await store.extensions(forBinary: install.binary)
         opcache = await store.opcacheConfig(forBinary: install.binary)
         draft = opcache
-        xdebug = await store.xdebugConfig(forBinary: install.binary)
+        xdebugInstalled = await store.xdebugInstalled(forBinary: install.binary)
+        await store.loadXdebug()
         loading = false
     }
 
@@ -361,15 +352,6 @@ struct ExtensionsPage: View {
         busy = true
         Task {
             await store.applyOpcache(cfg, binary: install.binary)
-            await reload()
-            busy = false
-        }
-    }
-
-    private func apply(mode: String, ideKey: String, port: Int, install: PhpInstall) {
-        busy = true
-        Task {
-            await store.applyXdebug(mode: mode, ideKey: ideKey, port: port, binary: install.binary)
             await reload()
             busy = false
         }

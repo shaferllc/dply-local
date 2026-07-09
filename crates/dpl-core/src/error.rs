@@ -31,6 +31,10 @@ pub enum CoreError {
     #[error("ipc protocol error: {0}")]
     Ipc(String),
 
+    /// A validation failure with a message already written for the user.
+    #[error("{0}")]
+    Message(String),
+
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }

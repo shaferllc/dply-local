@@ -42,6 +42,11 @@ pub struct LocalConfig {
     /// `/etc/hosts` entries, which keep iCloud Private Relay working since no
     /// local DNS proxy is involved).
     pub resolution: Option<String>,
+    /// Xdebug mode applied to sites with no explicit override. `None` means
+    /// `off`, so Xdebug costs nothing until a site asks for it.
+    pub default_xdebug: Option<String>,
+    /// IDE-side Xdebug connection settings, shared by every site.
+    pub xdebug: crate::xdebug::Settings,
 }
 
 impl LocalConfig {
@@ -129,6 +134,10 @@ pub struct Link {
     /// reverse-proxied instead of served over FastCGI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Xdebug mode for this site (overrides `default_xdebug`). A site with a
+    /// mode of its own gets its own php-fpm master.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xdebug: Option<String>,
 }
 
 impl LocalConfig {

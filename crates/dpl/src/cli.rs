@@ -175,6 +175,11 @@ pub enum Command {
         #[arg(long, default_value = "frankenphp")]
         server: String,
     },
+    /// Control Xdebug per site: step debugging, profiling, tracing.
+    Xdebug {
+        #[command(subcommand)]
+        command: Option<XdebugCmd>,
+    },
     /// Choose how .test resolves: `hosts` (Private-Relay-safe) or `resolver`.
     Resolution {
         /// `hosts`, `resolver`, or omit to show the current mode.
@@ -297,6 +302,44 @@ pub enum ValetCmd {
         /// Remove an explicit selection from a JSON manifest.
         #[arg(long)]
         manifest: Option<String>,
+    },
+}
+
+/// Xdebug operations. `dpl xdebug` with no subcommand shows the current mode
+/// for every site.
+///
+/// A mode is a comma-separated list: `develop`, `coverage`, `debug`, `gcstats`,
+/// `profile`, `trace` — or `off`. Sites with a mode of their own run on their
+/// own php-fpm pool, so turning on step debugging for one site leaves the rest
+/// untouched.
+#[derive(Subcommand)]
+pub enum XdebugCmd {
+    /// Show each site's Xdebug mode (the default with no subcommand).
+    Status,
+    /// Turn on step debugging (mode `debug`).
+    On {
+        /// Linked site name; omit to set the default for all sites.
+        site: Option<String>,
+    },
+    /// Turn Xdebug off.
+    Off {
+        /// Linked site name; omit to set the default for all sites.
+        site: Option<String>,
+    },
+    /// Set an explicit mode, e.g. `debug,develop` or `profile`.
+    Mode {
+        /// Comma-separated modes, or `off`.
+        mode: String,
+        /// Linked site name; omit to set the default for all sites.
+        site: Option<String>,
+    },
+    /// Set the port your IDE listens on (default 9003). Applies to all sites.
+    Port {
+        port: u16,
+    },
+    /// Set `xdebug.idekey` (e.g. PHPSTORM, VSCODE). Applies to all sites.
+    Ide {
+        key: String,
     },
 }
 

@@ -42,20 +42,45 @@ struct OpcacheConfig: Equatable {
     }
 }
 
-/// Xdebug settings for one PHP version (written via a dpl-managed conf.d file).
-struct XdebugConfig: Equatable {
-    var loaded = false
-    /// Installed on disk (keg/conf.d present) even if not currently loaded —
-    /// e.g. its `zend_extension` line is commented out.
-    var installed = false
-    var mode = "off"          // off | debug | develop | debug,develop
+/// One site's Xdebug state, as reported by `dpl xdebug --json`.
+struct XdebugSite: Identifiable, Equatable {
+    let name: String
+    /// Pinned PHP version, or `nil` for the default.
+    let php: String?
+    /// Canonical mode, e.g. `off`, `debug`, `debug,develop`.
+    let mode: String
+    /// Whether Xdebug exists for this site's PHP version at all.
+    let installed: Bool
+
+    var id: String { name }
+    var stepDebug: Bool { has("debug") }
+    var develop: Bool { has("develop") }
+    var isOff: Bool { mode == "off" }
+    /// The site wants Xdebug but its PHP version doesn't have it.
+    var missing: Bool { !isOff && !installed }
+
+    /// Whole-part match — `mode.contains("debug")` would also match `gcstats`
+    /// free spellings like `xdebug`, and would call `develop` a step-debug mode.
+    func has(_ part: String) -> Bool {
+        mode.split(separator: ",").contains { $0 == Substring(part) }
+    }
+}
+
+/// Xdebug state for the whole machine: the shared IDE settings plus one entry
+/// per site. The daemon owns this; the GUI never reads it back out of PHP.
+///
+/// Reading it from PHP is not merely redundant, it is wrong: dpl sets the mode
+/// through the `XDEBUG_MODE` environment variable, and Xdebug deliberately does
+/// not write that back into the `xdebug.mode` setting. `ini_get("xdebug.mode")`
+/// therefore reports `""` no matter which mode is actually live.
+struct XdebugState: Equatable {
     var clientPort = 9003
     var ideKey = "PHPSTORM"
+    var sites: [XdebugSite] = []
 
-    var stepDebug: Bool { mode.contains("debug") }
-    var develop: Bool { mode.contains("develop") }
-    /// Present but not active — needs enabling (uncommenting) rather than install.
-    var disabledButInstalled: Bool { installed && !loaded }
+    func site(_ name: String) -> XdebugSite? { sites.first { $0.name == name } }
+    /// Sites currently running with Xdebug on — drives the menu-bar indicator.
+    var active: [XdebugSite] { sites.filter { !$0.isOff } }
 }
 
 /// A `valet link`ed site discovered during import (name may differ from folder).
@@ -403,68 +428,71 @@ final class Store: ObservableObject {
         return val.arrayValue?.compactMap { $0.objectValue?["name"]?.stringValue } ?? []
     }
 
-    /// Xdebug config of the active (default) PHP — drives the menu-bar toggle.
-    @Published var activeXdebug = XdebugConfig()
+    /// Machine-wide Xdebug state, owned by the daemon.
+    @Published var xdebug = XdebugState()
 
-    /// Toggle step debugging on/off for the active PHP version.
-    func toggleActiveXdebug() async {
-        guard let bin = defaultPhpBinary else { return }
-        let mode = activeXdebug.stepDebug ? "off" : "debug"
-        await applyXdebug(mode: mode, ideKey: activeXdebug.ideKey, port: activeXdebug.clientPort, binary: bin)
-        await loadPhpConfig()
+    /// Refresh from `dpl xdebug --json`.
+    func loadXdebug() async {
+        let cli = self.cli
+        guard let val = await background({ try cli.json(["xdebug"]) }),
+              let obj = val.objectValue else { return }
+        var next = XdebugState()
+        if let p = obj["client_port"]?.intValue { next.clientPort = p }
+        if let k = obj["ide_key"]?.stringValue, !k.isEmpty { next.ideKey = k }
+        next.sites = (obj["sites"]?.arrayValue ?? []).compactMap { item -> XdebugSite? in
+            guard let o = item.objectValue, let name = o["name"]?.stringValue else { return nil }
+            return XdebugSite(
+                name: name,
+                php: o["php"]?.stringValue,
+                mode: o["mode"]?.stringValue ?? "off",
+                installed: o["installed"]?.boolValue ?? false
+            )
+        }
+        xdebug = next
     }
 
-    /// Read a version's Xdebug configuration.
-    func xdebugConfig(forBinary bin: String) async -> XdebugConfig {
-        let script = "echo json_encode(['loaded'=>extension_loaded('xdebug'),"
-            + "'mode'=>ini_get('xdebug.mode'),'port'=>ini_get('xdebug.client_port'),'idekey'=>ini_get('xdebug.idekey')]);"
-        let out = await backgroundQuiet { runProcess(bin, ["-d", "display_errors=stderr", "-r", script]) } ?? ""
-        var cfg = XdebugConfig()
-        guard let data = out.data(using: .utf8),
-              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return cfg }
-        cfg.loaded = (o["loaded"] as? Bool) ?? false
-        let mode = (o["mode"] as? String) ?? "off"
-        cfg.mode = mode.isEmpty ? "off" : mode
-        if let p = o["port"] as? String, let n = Int(p) { cfg.clientPort = n }
-        else if let n = o["port"] as? Int { cfg.clientPort = n }
-        if let k = o["idekey"] as? String, !k.isEmpty { cfg.ideKey = k }
-        cfg.installed = cfg.loaded
-        // Detect installed-but-disabled: the keg's .so is on disk even though
-        // its `zend_extension` line is commented out (so it isn't loaded).
-        if !cfg.loaded, let dir = await confDir(forBinary: bin),
-           let so = await backgroundQuiet({ xdebugSoPath(inDir: dir) }) ?? nil,
-           FileManager.default.fileExists(atPath: so) {
-            cfg.installed = true
-        }
-        return cfg
+    /// Set one site's mode, or the default for every site when `site` is nil.
+    /// The daemon moves the site onto a php-fpm pool for that mode and restarts
+    /// only what it must, so there is no `restartDaemon()` here.
+    func setXdebug(mode: String, site: String? = nil) async {
+        let cli = self.cli
+        var args = ["xdebug", "mode", mode]
+        if let site { args.append(site) }
+        _ = await background { try cli.runRaw(args) }
+        await loadXdebug()
+        await loadLocal()
     }
 
-    /// Write a version's Xdebug settings (dpl-managed conf.d file) + restart fpm.
-    func applyXdebug(mode: String, ideKey: String, port: Int, binary bin: String) async {
-        guard let dir = await confDir(forBinary: bin) else { return }
-        let body: String
-        if mode == "off" {
-            body = "; Managed by dpl — Xdebug\nxdebug.mode=off\n"
-        } else {
-            // Load the extension ourselves (the distro's conf.d line is often
-            // commented out), then set the mode — so turning Xdebug on always
-            // actually loads it.
-            let load = (await backgroundQuiet { xdebugSoPath(inDir: dir) } ?? nil)
-                .map { "zend_extension=\($0)\n" } ?? ""
-            body = """
-            ; Managed by dpl — Xdebug (edit via the Extensions panel)
-            \(load)xdebug.mode=\(mode)
-            xdebug.start_with_request=yes
-            xdebug.client_host=127.0.0.1
-            xdebug.client_port=\(port)
-            xdebug.idekey=\(ideKey)
-            xdebug.discover_client_host=false
+    /// Toggle step debugging for one site.
+    func toggleXdebug(site: String) async {
+        let on = xdebug.site(site)?.stepDebug ?? false
+        await setXdebug(mode: on ? "off" : "debug", site: site)
+    }
 
-            """
-        }
-        let path = dir + "/zz-dpl-xdebug.ini"
-        _ = await backgroundQuiet { (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil }
-        await restartDaemon()
+    /// Toggle the machine-wide default (what the menu-bar item drives).
+    func toggleDefaultXdebug() async {
+        let anyOn = !xdebug.active.isEmpty
+        await setXdebug(mode: anyOn ? "off" : "debug")
+    }
+
+    func setXdebugPort(_ port: Int) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["xdebug", "port", String(port)]) }
+        await loadXdebug()
+    }
+
+    func setXdebugIdeKey(_ key: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["xdebug", "ide", key]) }
+        await loadXdebug()
+    }
+
+    /// Whether Xdebug exists for a PHP binary — a filesystem check, so it stays
+    /// correct for a version that has the extension installed but commented out.
+    func xdebugInstalled(forBinary bin: String) async -> Bool {
+        guard let dir = await confDir(forBinary: bin) else { return false }
+        guard let so = await backgroundQuiet({ xdebugSoPath(inDir: dir) }) ?? nil else { return false }
+        return FileManager.default.fileExists(atPath: so)
     }
 
     /// Read a version's OPcache configuration.
@@ -1073,7 +1101,7 @@ final class Store: ObservableObject {
         if let dir = scanDir, !dir.isEmpty {
             phpExtensions = await backgroundQuiet { scanExtensions(dir) } ?? []
         }
-        activeXdebug = await xdebugConfig(forBinary: bin)
+        await loadXdebug()
     }
 
     private func value(in text: String, after key: String) -> String? {

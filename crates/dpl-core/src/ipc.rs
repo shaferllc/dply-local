@@ -62,6 +62,19 @@ pub enum Request {
     /// Set a linked site's runtime: `fpm` | `octane-swoole` |
     /// `octane-roadrunner` | `octane-frankenphp`.
     SetRuntime { site: String, runtime: String },
+    /// Set the Xdebug mode for one site, or the default when `site` is `None`.
+    /// `port`/`ide_key` update the shared IDE settings; any field left `None`
+    /// is untouched.
+    SetXdebug {
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        site: Option<String>,
+        #[serde(default)]
+        port: Option<u16>,
+        #[serde(default)]
+        ide_key: Option<String>,
+    },
     /// Toggle HTTPS for a site (Phase 4 — accepted now, enforced later).
     Secure { name: String, secure: bool },
     /// Manage reverse proxies. `action` ∈ set|remove (list is via ListSites).
@@ -177,6 +190,12 @@ pub struct SiteInfo {
     /// PHP version the project requires (composer.json `require.php`, e.g. `"^8.3"`).
     #[serde(default)]
     pub requires_php: Option<String>,
+    /// Effective Xdebug mode, e.g. `"off"`, `"debug"`, `"debug,develop"`.
+    #[serde(default)]
+    pub xdebug: Option<String>,
+    /// Whether Xdebug is installed for this site's PHP version at all.
+    #[serde(default)]
+    pub xdebug_installed: bool,
 }
 
 /// One local database/cache service.

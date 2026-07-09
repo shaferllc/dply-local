@@ -27,22 +27,9 @@ struct MenuBarContent: View {
 
         Divider()
 
-        // Xdebug step-debug quick toggle — front and center.
-        if store.activeXdebug.stepDebug {
-            Button {
-                Task { await store.toggleActiveXdebug() }
-            } label: {
-                Label("Stop Debugging (Xdebug on)", systemImage: "ladybug.fill")
-            }
-        } else if store.activeXdebug.loaded || store.activeXdebug.disabledButInstalled {
-            Button {
-                Task { await store.toggleActiveXdebug() }
-            } label: {
-                Label("Start Debugging (Xdebug)", systemImage: "ladybug")
-            }
-        } else {
-            Button("Install Xdebug…") { openManager() }
-        }
+        // Xdebug — front and center. Modes are per-site, so the menu turns each
+        // site on or off individually and names the ones currently debugging.
+        xdebugSection
 
         Divider()
 
@@ -155,6 +142,46 @@ struct MenuBarContent: View {
     }
 
     /// Open the main window on the PHP Version Manager section.
+    /// Per-site Xdebug controls. Sites whose PHP version lacks the extension are
+    /// shown disabled rather than hidden, so "why isn't my site listed?" never
+    /// comes up — the menu says it needs installing.
+    @ViewBuilder
+    private var xdebugSection: some View {
+        let sites = store.xdebug.sites
+        let active = store.xdebug.active
+
+        if sites.isEmpty {
+            Text("No sites to debug").disabled(true)
+        } else if !active.isEmpty {
+            // Fast path out of a debugging session, without hunting for the site.
+            Button {
+                Task { await store.setXdebug(mode: "off") }
+            } label: {
+                Label(
+                    active.count == 1
+                        ? "Stop Debugging (\(active[0].name))"
+                        : "Stop Debugging (\(active.count) sites)",
+                    systemImage: "ladybug.fill"
+                )
+            }
+        }
+
+        Menu(active.isEmpty ? "Start Debugging" : "Debug Another Site") {
+            ForEach(sites) { site in
+                Button {
+                    Task { await store.toggleXdebug(site: site.name) }
+                } label: {
+                    Text("\(site.stepDebug ? "✓ " : "")\(site.name)\(site.installed ? "" : " (not installed)")")
+                }
+                .disabled(!site.installed)
+            }
+            if sites.contains(where: { !$0.installed }) {
+                Divider()
+                Button("Install Xdebug…") { openManager() }
+            }
+        }
+    }
+
     private func openManager() {
         store.section = .php
         Task { await store.loadPhpCatalog() }

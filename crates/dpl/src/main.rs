@@ -89,6 +89,22 @@ fn run() -> Result<()> {
         Command::Setup { no_ports } => commands::local::setup(home.as_deref(), !no_ports),
         Command::Runtime { site, runtime } => commands::local::set_runtime(home.as_deref(), site, runtime),
         Command::Octane { site, server } => commands::local::octane_setup(home.as_deref(), &site, &server),
+        Command::Xdebug { command } => match command {
+            None | Some(cli::XdebugCmd::Status) => {
+                commands::xdebug::status(home.as_deref(), args.json)
+            }
+            Some(cli::XdebugCmd::On { site }) => {
+                commands::xdebug::set_mode(home.as_deref(), "debug", site)
+            }
+            Some(cli::XdebugCmd::Off { site }) => {
+                commands::xdebug::set_mode(home.as_deref(), "off", site)
+            }
+            Some(cli::XdebugCmd::Mode { mode, site }) => {
+                commands::xdebug::set_mode(home.as_deref(), &mode, site)
+            }
+            Some(cli::XdebugCmd::Port { port }) => commands::xdebug::set_port(home.as_deref(), port),
+            Some(cli::XdebugCmd::Ide { key }) => commands::xdebug::set_ide(home.as_deref(), key),
+        },
         Command::Resolution { mode } => commands::local::resolution(home.as_deref(), mode),
         Command::Takeover => commands::local::takeover(home.as_deref()),
         Command::Untakeover => commands::local::untakeover(home.as_deref()),

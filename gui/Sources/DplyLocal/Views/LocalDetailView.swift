@@ -10,6 +10,7 @@ struct LocalDetailView: View {
     @State private var showParity = false
     @State private var showAddTld = false
     @State private var newTld = ""
+    @State private var xdebugBusy = false
 
     private var name: String { site.cell(["name"]) }
     private var url: String { site.cell(["url"]) }
@@ -31,6 +32,81 @@ struct LocalDetailView: View {
     private var phpCompatible: Bool? {
         guard !requiresPhp.isEmpty, !effectivePhp.isEmpty else { return nil }
         return phpSatisfies(requiresPhp, effectivePhp)
+    }
+
+    // MARK: Xdebug
+
+    /// This site's Xdebug state, from the daemon. Falls back to `off` while the
+    /// first `dpl xdebug` call is still in flight.
+    private var xdebug: XdebugSite {
+        store.xdebug.site(name)
+            ?? XdebugSite(name: name, php: nil, mode: "off", installed: false)
+    }
+
+    /// The single mode the segmented control shows. Xdebug modes compose, but
+    /// the picker offers one at a time; `debug` wins when several are set so a
+    /// site mid-debug never looks like it's only profiling.
+    private var xdebugChoice: String {
+        for m in ["debug", "profile", "trace", "develop"] where xdebug.has(m) { return m }
+        return "off"
+    }
+
+    /// Per-site Xdebug. Modes are stored per *linked* site, exactly as PHP
+    /// version pinning and HTTPS are, so parked sites can only follow the
+    /// machine-wide default.
+    @ViewBuilder
+    private var xdebugSection: some View {
+        DetailSection(title: "Xdebug") {
+            VStack(alignment: .leading, spacing: 10) {
+                if !isLinked {
+                    Text("Parked sites follow the default Xdebug mode (currently **\(store.xdebug.sites.first { $0.name == name }?.mode ?? "off")**). Link this site to give it a mode of its own.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if !xdebug.installed {
+                    Label("Xdebug isn't installed for PHP \(effectivePhp.isEmpty ? "this version" : effectivePhp). Install it from the Extensions page.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+
+                Picker("", selection: Binding(
+                    get: { xdebugChoice },
+                    set: { mode in
+                        Task {
+                            xdebugBusy = true
+                            await store.setXdebug(mode: mode, site: name)
+                            xdebugBusy = false
+                        }
+                    })) {
+                    Text("Off").tag("off")
+                    Text("Step Debug").tag("debug")
+                    Text("Develop").tag("develop")
+                    Text("Profile").tag("profile")
+                    Text("Trace").tag("trace")
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                .disabled(xdebugBusy || !isLinked || !xdebug.installed)
+
+                Group {
+                    switch xdebugChoice {
+                    case "debug":
+                        Text("Listen on **127.0.0.1:\(store.xdebug.clientPort)** (IDE key `\(store.xdebug.ideKey)`), set a breakpoint, reload the site.")
+                    case "develop":
+                        Text("Better error messages and `var_dump` output. No breakpoints.")
+                    case "profile":
+                        Text("Writes a cachegrind profile per request to `~/.dpl/xdebug`. Open it with QCachegrind or PhpStorm.")
+                    case "trace":
+                        Text("Writes a full function trace per request to `~/.dpl/xdebug`. Verbose — turn it off when you're done.")
+                    default:
+                        Text("Off — this site runs on the shared pool with no Xdebug loaded, at full speed.")
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+
+                if xdebugChoice != "off" {
+                    Text("Only this site is affected; the others keep running without Xdebug.")
+                        .font(.caption2).foregroundStyle(Theme.violet)
+                }
+            }
+        }
     }
 
     /// Minimal PHP version-constraint check (`^8.3`, `~8.1`, `>=8.1`, `8.2.*`).
@@ -176,6 +252,10 @@ struct LocalDetailView: View {
                         ("Runtime", ["runtime"]),
                         ("Project", ["path"]),
                     ])
+                }
+
+                if !isProxy {
+                    xdebugSection
                 }
 
                 if !requiresPhp.isEmpty {

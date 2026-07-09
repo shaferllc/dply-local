@@ -21,7 +21,7 @@ pub struct PhpVersion {
 }
 
 /// Common Homebrew prefixes (Apple silicon, Intel) plus a Linuxbrew default.
-const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
+pub const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
 
 /// All PHP installs we can find, de-duplicated by version (Homebrew wins over a
 /// bare `PATH` entry), sorted newest-first.
@@ -201,7 +201,7 @@ pub fn default_version() -> Option<String> {
 /// Ask a php binary for its `major.minor` version. Runs with `-n` (no php.ini)
 /// so a broken extension's startup warning can't pollute the output — the
 /// version is a compile-time constant and needs no ini.
-fn version_of(bin: &PathBuf) -> Option<String> {
+pub fn version_of(bin: &std::path::Path) -> Option<String> {
     let out = Command::new(bin)
         .arg("-n")
         .arg("-r")

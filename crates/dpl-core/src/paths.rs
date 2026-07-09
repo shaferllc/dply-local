@@ -80,3 +80,31 @@ pub fn services_config(override_home: Option<&str>) -> Result<PathBuf> {
     Ok(dpl_dir(override_home)?.join("services.toml"))
 }
 
+/// A filesystem-safe key for a PHP binary path, used to name the directory
+/// holding the config we generate for it.
+pub fn php_key(php_bin: &std::path::Path) -> String {
+    php_bin
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// `~/.dpl/php/<key>` — generated php-fpm and ini config for one PHP binary.
+pub fn php_dir(override_home: Option<&str>, php_bin: &std::path::Path) -> Result<PathBuf> {
+    Ok(dpl_dir(override_home)?.join("php").join(php_key(php_bin)))
+}
+
+/// `~/.dpl/php/<key>/conf.d` — dpl's *own* ini scan directory for a PHP binary.
+///
+/// The daemon points its php-fpm masters at this via `PHP_INI_SCAN_DIR` so we
+/// can load Xdebug without ever writing to the system's `conf.d`.
+pub fn php_conf_dir(override_home: Option<&str>, php_bin: &std::path::Path) -> Result<PathBuf> {
+    Ok(php_dir(override_home, php_bin)?.join("conf.d"))
+}
+
+/// `~/.dpl/xdebug` — where Xdebug writes profiler and trace output.
+pub fn xdebug_dir(override_home: Option<&str>) -> Result<PathBuf> {
+    Ok(dpl_dir(override_home)?.join("xdebug"))
+}
+

@@ -15,8 +15,9 @@ use anyhow::{Context, Result};
 use dpl_core::config::LocalConfig;
 use dpl_core::ipc::SiteInfo;
 use dpl_core::sites::{self, ResolvedSite};
+use dpl_core::xdebug::Mode;
 
-use crate::fpm::FpmManager;
+use crate::fpm::{FpmManager, MasterKey};
 
 /// Everything the proxy needs to serve one request for a site.
 pub struct SiteRoute {
@@ -33,6 +34,8 @@ pub struct SiteRoute {
 struct RouteInfo {
     docroot: PathBuf,
     php_bin: PathBuf,
+    /// Which php-fpm master this site belongs to, together with `php_bin`.
+    xdebug: Mode,
     secure: bool,
     upstream: Option<u16>,
 }
@@ -45,6 +48,10 @@ pub struct Registry {
     routes: BTreeMap<String, RouteInfo>,
     /// Configured TLDs (cached from config for the request hot path).
     tlds: Vec<String>,
+    /// Whether Xdebug is installed, per PHP binary. Probing it runs `php --ini`,
+    /// so it is resolved once per reconcile and read from here afterwards —
+    /// spawning a process per site under the registry lock deadlocks the daemon.
+    xdebug_installed: BTreeMap<PathBuf, bool>,
 }
 
 impl Registry {
@@ -59,7 +66,13 @@ impl Registry {
             appservers: crate::appserver::AppServers::new(),
             routes: BTreeMap::new(),
             tlds,
+            xdebug_installed: BTreeMap::new(),
         })
+    }
+
+    /// Cached answer to "is Xdebug installed for this PHP binary?".
+    fn xdebug_installed(&self, php_bin: &std::path::Path) -> bool {
+        self.xdebug_installed.get(php_bin).copied().unwrap_or(false)
     }
 
     /// The primary TLD (for building canonical URLs).
@@ -95,7 +108,7 @@ impl Registry {
         let route = self.routes.get(site_name)?;
         // Octane sites are served by proxying to their upstream port; a dummy
         // fpm_addr is fine since the proxy checks `upstream` first.
-        let fpm_addr = match self.fpm.addr_for(&route.php_bin) {
+        let fpm_addr = match self.fpm.addr_for(&route.php_bin, &route.xdebug) {
             Some(a) => a,
             None if route.upstream.is_some() => SocketAddr::from(([127, 0, 0, 1], 0)),
             None => return None,
@@ -120,7 +133,15 @@ impl Registry {
                 let serving = self
                     .routes
                     .get(&s.name)
-                    .map(|r| r.upstream.is_some() || self.fpm.addr_for(&r.php_bin).is_some())
+                    .map(|r| {
+                        r.upstream.is_some() || self.fpm.addr_for(&r.php_bin, &r.xdebug).is_some()
+                    })
+                    .unwrap_or(false);
+                // Reuse the cached route's binary rather than re-resolving PHP.
+                let xdebug_installed = self
+                    .routes
+                    .get(&s.name)
+                    .map(|r| self.xdebug_installed(&r.php_bin))
                     .unwrap_or(false);
                 SiteInfo {
                     host: s.host(),
@@ -135,6 +156,8 @@ impl Registry {
                     runtime: s.runtime,
                     framework: sites::detect_framework(&s.path),
                     requires_php: sites::detect_required_php(&s.path),
+                    xdebug: Some(s.xdebug.to_string()),
+                    xdebug_installed,
                 }
             })
             .collect();
@@ -155,6 +178,9 @@ impl Registry {
                 runtime: None,
                 framework: None,
                 requires_php: None,
+                // A reverse proxy runs no PHP of ours, so Xdebug is meaningless.
+                xdebug: None,
+                xdebug_installed: false,
             });
         }
         infos.sort_by(|a, b| a.name.cmp(&b.name));
@@ -193,16 +219,31 @@ impl Registry {
             }
         };
 
-        // Ensure a master per distinct PHP binary; drop the rest. Remember each
-        // site's binary so we don't resolve it again for the routes.
-        let mut needed: BTreeSet<PathBuf> = BTreeSet::new();
+        // Push the current IDE settings down before spawning anything. If they
+        // changed, every running master is holding a stale loader ini, so drop
+        // them all and let the loop below respawn with the new port / IDE key.
+        if self.fpm.set_xdebug_settings(self.config.xdebug.clone()) {
+            self.fpm.retain(&BTreeSet::new());
+        }
+
+        // Ensure a master per distinct (PHP binary, Xdebug mode); drop the rest.
+        // Remember each site's binary so we don't resolve it again for the routes.
+        let mut needed: BTreeSet<MasterKey> = BTreeSet::new();
         let site_bins: Vec<PathBuf> = resolved.iter().map(&bin_for).collect();
-        for bin in &site_bins {
-            if self.fpm.ensure(bin).is_ok() {
-                needed.insert(bin.clone());
+        for (site, bin) in resolved.iter().zip(&site_bins) {
+            if self.fpm.ensure(bin, &site.xdebug).is_ok() {
+                needed.insert((bin.clone(), site.xdebug.clone()));
             }
         }
         self.fpm.retain(&needed);
+
+        // Refresh the Xdebug-installed cache once per distinct binary.
+        self.xdebug_installed = site_bins
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|b| (b.clone(), dpl_core::xdebug::installed(b)))
+            .collect();
 
         // Start/stop Octane servers for sites on a non-fpm runtime, and record
         // each one's upstream port.
@@ -227,6 +268,7 @@ impl Registry {
                 RouteInfo {
                     docroot: site.docroot.clone(),
                     php_bin: bin,
+                    xdebug: site.xdebug.clone(),
                     secure: site.secure,
                     upstream: upstreams.get(&site.name).copied(),
                 },
@@ -241,7 +283,7 @@ impl Registry {
 
         self.routes
             .values()
-            .filter(|r| self.fpm.addr_for(&r.php_bin).is_some())
+            .filter(|r| self.fpm.addr_for(&r.php_bin, &r.xdebug).is_some())
             .count()
     }
 
@@ -302,7 +344,13 @@ impl Registry {
         };
         self.config.links.insert(
             name.clone(),
-            dpl_core::config::Link { path: path.clone(), php: None, secure: false, runtime: None },
+            dpl_core::config::Link {
+                path: path.clone(),
+                php: None,
+                secure: false,
+                runtime: None,
+                xdebug: None,
+            },
         );
         self.save()?;
         self.reconcile();
@@ -337,7 +385,7 @@ impl Registry {
             let Ok(path) = canonicalize(path) else { continue };
             self.config.links.insert(
                 name.to_lowercase(),
-                dpl_core::config::Link { path, php: None, secure: false, runtime: None },
+                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None },
             );
             linked_ok += 1;
         }
@@ -390,6 +438,90 @@ impl Registry {
         self.save()?;
         let n = self.reconcile();
         Ok(format!("`{site}` now runs on {runtime}. Serving {n} site(s)."))
+    }
+
+    /// Set the Xdebug mode for one linked site, or the default for all sites
+    /// when `site` is `None`. `port`/`ide_key` update the shared IDE settings.
+    ///
+    /// Changing a mode moves the site onto a different php-fpm master, which
+    /// [`Registry::reconcile`] spawns on demand; `off` is the shared, no-Xdebug
+    /// master, so the common case never pays for the feature.
+    pub fn set_xdebug(
+        &mut self,
+        mode: Option<&str>,
+        site: Option<&str>,
+        port: Option<u16>,
+        ide_key: Option<&str>,
+    ) -> Result<String> {
+        let mut messages: Vec<String> = Vec::new();
+
+        if let Some(p) = port {
+            self.config.xdebug.client_port = p;
+            messages.push(format!("IDE port set to {p}."));
+        }
+        if let Some(k) = ide_key {
+            let k = k.trim().to_uppercase();
+            if k.is_empty() {
+                anyhow::bail!("IDE key cannot be empty");
+            }
+            messages.push(format!("IDE key set to {k}."));
+            self.config.xdebug.ide_key = k;
+        }
+
+        if let Some(raw) = mode {
+            // Parse before touching config so an invalid mode changes nothing.
+            let parsed = Mode::parse(raw)?;
+            let stored = (!parsed.is_off()).then(|| parsed.to_string());
+
+            match site {
+                Some(name) => {
+                    let name = name.to_lowercase();
+                    let link = self.config.links.get_mut(&name).with_context(|| {
+                        format!("{name} is not linked (Xdebug modes apply to linked sites; \
+                                 set the default with `dpl xdebug mode {parsed}`)")
+                    })?;
+                    link.xdebug = stored;
+                    messages.push(if parsed.is_off() {
+                        format!("Xdebug off for {name}.")
+                    } else {
+                        format!("Xdebug `{parsed}` for {name}.")
+                    });
+                }
+                None => {
+                    self.config.default_xdebug = stored;
+                    messages.push(if parsed.is_off() {
+                        "Xdebug off by default.".into()
+                    } else {
+                        format!("Xdebug `{parsed}` by default.")
+                    });
+                }
+            }
+
+            // Warn rather than fail: the site still serves, just without Xdebug,
+            // and the user may be about to install it.
+            if !parsed.is_off() {
+                let bin = self
+                    .routes
+                    .get(site.unwrap_or_default())
+                    .map(|r| r.php_bin.clone())
+                    .unwrap_or_else(dpl_core::php::default_binary);
+                if !dpl_core::xdebug::installed(&bin) {
+                    messages.push(format!(
+                        "Warning: Xdebug is not installed for {} — install it with \
+                         `dpl php ext-install <version> xdebug`.",
+                        bin.display()
+                    ));
+                }
+            }
+        }
+
+        if messages.is_empty() {
+            return Ok("Nothing to change.".into());
+        }
+        self.save()?;
+        let n = self.reconcile();
+        messages.push(format!("Serving {n} site(s)."));
+        Ok(messages.join(" "))
     }
 
     /// Switch how `.test` names resolve: `hosts` (per-site /etc/hosts entries,

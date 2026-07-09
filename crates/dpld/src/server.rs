@@ -151,6 +151,12 @@ async fn dispatch(
         Request::SetRuntime { site, runtime } => {
             mutate(state, |r| r.set_runtime(&site, &runtime)).await
         }
+        Request::SetXdebug { mode, site, port, ide_key } => {
+            mutate(state, |r| {
+                r.set_xdebug(mode.as_deref(), site.as_deref(), port, ide_key.as_deref())
+            })
+            .await
+        }
         Request::Link { name, path } => {
             mutate(state, |r| r.link(name.as_deref(), &path)).await
         }

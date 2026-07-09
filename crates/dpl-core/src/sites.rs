@@ -98,6 +98,10 @@ pub struct ResolvedSite {
     /// Application-server runtime (`None`/`"fpm"` = php-fpm; else an Octane
     /// server the daemon supervises + proxies).
     pub runtime: Option<String>,
+    /// Effective Xdebug mode: the site's own setting, else the config default.
+    /// An unparsable stored value degrades to `off` rather than failing the
+    /// whole reconcile over one bad site.
+    pub xdebug: crate::xdebug::Mode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +156,12 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
     let mut seen: std::collections::BTreeSet<String> = Default::default();
     let tld = config.primary_tld();
 
+    let mode_of = |raw: Option<&String>| -> crate::xdebug::Mode {
+        raw.or(config.default_xdebug.as_ref())
+            .map(|m| crate::xdebug::Mode::parse(m).unwrap_or_default())
+            .unwrap_or_default()
+    };
+
     // Links first so they win on name collisions.
     for (name, link) in &config.links {
         let name = name.to_lowercase();
@@ -167,6 +177,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
             source: SiteSource::Linked,
             tld: tld.clone(),
             runtime: link.runtime.clone(),
+            xdebug: mode_of(link.xdebug.as_ref()),
         });
     }
 
@@ -193,6 +204,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
                 source: SiteSource::Parked,
                 tld: tld.clone(),
                 runtime: None,
+                xdebug: mode_of(None),
             });
         }
     }
