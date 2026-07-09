@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod doctor;
 pub mod dply;
 pub mod local;
+pub mod mail;
 pub mod parity;
 pub mod valet;
 pub mod xdebug;

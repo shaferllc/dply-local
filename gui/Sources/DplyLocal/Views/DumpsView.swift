@@ -642,20 +642,8 @@ struct DiffView: View {
     }
 }
 
-/// Renders a captured email's HTML in a lightweight web view for preview.
-struct MailWebView: NSViewRepresentable {
-    let html: String
-
-    func makeNSView(context: Context) -> WKWebView {
-        let view = WKWebView()
-        view.setValue(false, forKey: "drawsBackground")
-        return view
-    }
-
-    func updateNSView(_ view: WKWebView, context: Context) {
-        view.loadHTMLString(html, baseURL: nil)
-    }
-}
+// `MailWebView` lives in MailWebView.swift — it blocks remote content, which
+// this preview needs just as much as the Mail viewer does.
 
 /// Map a dump's color name to a SwiftUI color.
 func colorFor(_ name: String?) -> Color {

@@ -83,6 +83,83 @@ struct XdebugState: Equatable {
     var active: [XdebugSite] { sites.filter { !$0.isOff } }
 }
 
+/// One attachment or inline part of a captured message.
+struct MailAttachment: Identifiable, Hashable {
+    let index: Int
+    let name: String
+    let mime: String
+    let size: Int
+    /// Referenced from the HTML body by `cid:`, not offered as a download.
+    let inline: Bool
+
+    var id: Int { index }
+
+    var humanSize: String {
+        let kb = 1024, mb = kb * 1024
+        switch size {
+        case mb...: return String(format: "%.1f MB", Double(size) / Double(mb))
+        case kb...: return String(format: "%.1f KB", Double(size) / Double(kb))
+        default: return "\(size) B"
+        }
+    }
+}
+
+/// A fully parsed message, from `dpl mail show <id> --json`.
+struct MailMessage {
+    let id: String
+    let mailbox: String
+    let from: String
+    let to: String
+    let cc: String
+    let subject: String
+    let date: String?
+    let size: Int
+    let text: String?
+    /// HTML with `cid:` images already inlined as `data:` URIs, so it renders
+    /// fully with the network blocked.
+    let html: String?
+    /// How many http(s) resources the HTML would fetch if we let it.
+    let remoteResources: Int
+    let links: [String]
+    let attachments: [MailAttachment]
+    let headers: [(name: String, value: String)]
+
+    /// Attachments worth showing as downloads — inline parts belong to the body.
+    var downloads: [MailAttachment] { attachments.filter { !$0.inline } }
+
+    init?(_ value: JSONValue) {
+        guard let o = value.objectValue, let id = o["id"]?.stringValue else { return nil }
+        self.id = id
+        mailbox = o["mailbox"]?.stringValue ?? "-"
+        from = o["from"]?.stringValue ?? ""
+        to = o["to"]?.stringValue ?? ""
+        cc = o["cc"]?.stringValue ?? ""
+        subject = o["subject"]?.stringValue ?? ""
+        date = o["date"]?.stringValue
+        size = o["size"]?.intValue ?? 0
+        text = o["text"]?.stringValue
+        html = o["html"]?.stringValue
+        remoteResources = o["remote_resources"]?.intValue ?? 0
+        links = (o["links"]?.arrayValue ?? []).compactMap(\.stringValue)
+        attachments = (o["attachments"]?.arrayValue ?? []).compactMap { item -> MailAttachment? in
+            guard let a = item.objectValue, let index = a["index"]?.intValue else { return nil }
+            return MailAttachment(
+                index: index,
+                name: a["name"]?.stringValue ?? "(unnamed)",
+                mime: a["mime"]?.stringValue ?? "application/octet-stream",
+                size: a["size"]?.intValue ?? 0,
+                inline: a["inline"]?.boolValue ?? false
+            )
+        }
+        // Serialized as a list of [name, value] pairs.
+        headers = (o["headers"]?.arrayValue ?? []).compactMap { pair in
+            guard let p = pair.arrayValue, p.count == 2,
+                  let name = p[0].stringValue, let value = p[1].stringValue else { return nil }
+            return (name, value)
+        }
+    }
+}
+
 /// A `valet link`ed site discovered during import (name may differ from folder).
 struct ValetSite: Identifiable, Hashable {
     let name: String
@@ -1005,11 +1082,16 @@ final class Store: ObservableObject {
         name == unattributedMailbox ? "No username" : name
     }
 
+    /// Free-text query across subject, sender, recipient and body.
+    @Published var mailSearch = ""
+
     func loadMail() async {
         let cli = self.cli
         let filter = mailboxFilter
+        let query = mailSearch.trimmingCharacters(in: .whitespaces)
         var args = ["mail", "list"]
         if let filter { args += ["--mailbox", filter] }
+        if !query.isEmpty { args += ["--search", query] }
         if let r = await background({ try cli.rows(args) }) { mailMessages = r }
         // Counts always cover every mailbox, so the switcher can show the ones
         // the current filter is hiding.
@@ -1033,11 +1115,43 @@ final class Store: ObservableObject {
         await loadMail()
     }
 
-    /// Raw body of one captured message (for the reader pane).
+    /// Raw source of one captured message (the Raw tab).
     func mailBody(_ id: String) async -> String {
         let cli = self.cli
         let data = await background { try cli.runRaw(["mail", "show", id]) }
         return data.map { String(decoding: $0, as: UTF8.self) } ?? ""
+    }
+
+    /// Everything about one message in a single call: bodies, headers, links,
+    /// attachment metadata and the remote-resource count.
+    func mailMessage(_ id: String) async -> MailMessage? {
+        let cli = self.cli
+        guard let value = await background({ try cli.json(["mail", "show", id]) }) else { return nil }
+        return MailMessage(value)
+    }
+
+    /// Save an attachment, asking where to put it.
+    func saveAttachment(messageId: String, attachment: MailAttachment) async {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = attachment.name
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let cli = self.cli
+        _ = await background {
+            try cli.runRaw(["mail", "save", messageId, String(attachment.index), "--out", url.path])
+        }
+    }
+
+    /// Drop a sample message into the sink — proves the wiring and gives the
+    /// viewer something to render.
+    func sendTestMail(mailbox: String?, html: Bool) async {
+        let cli = self.cli
+        var args = ["mail", "send"]
+        if html { args.append("--html") }
+        if let mailbox, !mailbox.isEmpty { args += ["--mailbox", mailbox] }
+        _ = await background { try cli.runRaw(args) }
+        await loadMail()
     }
 
     func loadTlds() async {

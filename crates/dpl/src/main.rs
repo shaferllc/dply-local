@@ -118,8 +118,25 @@ fn run() -> Result<()> {
         Command::Db { action, name, engine, port, file } => {
             commands::local::db(home.as_deref(), action, engine, name, port, file)
         }
-        Command::Mail { action, id, mailbox } => {
-            commands::local::mail(home.as_deref(), action, id, mailbox, args.json)
+        Command::Mail { command } => {
+            use cli::MailCmd;
+            let home = home.as_deref();
+            match command.unwrap_or(MailCmd::List { mailbox: None, search: None }) {
+                MailCmd::List { mailbox, search } => {
+                    commands::mail::list(home, mailbox, search, args.json)
+                }
+                MailCmd::Mailboxes => commands::mail::mailboxes(home, args.json),
+                MailCmd::Show { id, part } => {
+                    commands::mail::show(home, &id, part.parse()?, args.json)
+                }
+                MailCmd::Attachments { id } => commands::mail::attachments(home, &id, args.json),
+                MailCmd::Save { id, index, out } => commands::mail::save(home, &id, index, out),
+                MailCmd::Links { id } => commands::mail::links(home, &id, args.json),
+                MailCmd::Send { to, from, subject, mailbox, html, body } => {
+                    commands::mail::send(to, from, subject, mailbox, html, body)
+                }
+                MailCmd::Clear { mailbox } => commands::mail::clear(home, mailbox),
+            }
         }
         Command::Daemon { action } => commands::daemon::manage(home.as_deref(), action),
         Command::Tld { action, name } => commands::local::tld(home.as_deref(), action, name, args.json),

@@ -63,6 +63,23 @@ struct MailListView: View {
 
             Spacer()
 
+            Menu {
+                Button("Plain text") { Task { await store.sendTestMail(mailbox: nil, html: false) } }
+                Button("HTML (with a blocked tracking pixel)") {
+                    Task { await store.sendTestMail(mailbox: nil, html: true) }
+                }
+                if let box = store.mailboxFilter, box != Store.unattributedMailbox {
+                    Divider()
+                    Button("HTML as `\(box)`") {
+                        Task { await store.sendTestMail(mailbox: box, html: true) }
+                    }
+                }
+            } label: {
+                Image(systemName: "paperplane")
+            }
+            .menuStyle(.borderlessButton).fixedSize()
+            .help("Send a test message into the sink")
+
             Button { showSetup = true } label: {
                 Image(systemName: "questionmark.circle")
             }
@@ -84,10 +101,21 @@ struct MailListView: View {
             }
             ForEach(store.mailMessages) { row in
                 let mailbox = row.cell(["mailbox"])
+                let attachments = Int(row.cell(["attachments"])) ?? 0
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(nonEmpty(row.cell(["subject"]), "(no subject)"))
-                        .font(.body.weight(.semibold))
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(nonEmpty(row.cell(["subject"]), "(no subject)"))
+                            .font(.body.weight(.semibold))
+                            .lineLimit(1)
+                        if attachments > 0 {
+                            Image(systemName: "paperclip")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    let preview = row.cell(["preview"])
+                    if !preview.isEmpty {
+                        Text(preview).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
                         Text(nonEmpty(row.cell(["to"]), "—"))
@@ -105,6 +133,13 @@ struct MailListView: View {
                 .padding(.vertical, 3)
                 .tag(row.cell(["id"]))
             }
+        }
+        .searchable(text: $store.mailSearch, placement: .automatic, prompt: "Search mail")
+        // Re-run the search server-side: the body text lives in the .eml, not in
+        // the rows we already hold.
+        .task(id: store.mailSearch) {
+            try? await Task.sleep(for: .milliseconds(250)) // debounce typing
+            if !Task.isCancelled { await store.loadMail() }
         }
         .overlay { if store.isLoading { ProgressView().controlSize(.small) } }
     }
@@ -127,6 +162,9 @@ struct MailListView: View {
             } actions: {
                 Button("Show me how") { showSetup = true }
                     .buttonStyle(.borderedProminent)
+                Button("Send a test message") {
+                    Task { await store.sendTestMail(mailbox: nil, html: true) }
+                }
             }
         }
     }
@@ -136,29 +174,4 @@ struct MailListView: View {
     }
 }
 
-/// Detail pane: the raw message source.
-struct MailDetailView: View {
-    @EnvironmentObject var store: Store
-    let id: String
-
-    @State private var body_ = ""
-    @State private var loading = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ScrollView {
-                Text(loading ? "Loading…" : (body_.isEmpty ? "(empty message)" : body_))
-                    .font(.system(.callout, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-            }
-        }
-        .background(Color(nsColor: .textBackgroundColor))
-        .task(id: id) {
-            loading = true
-            body_ = await store.mailBody(id)
-            loading = false
-        }
-    }
-}
+// `MailDetailView` lives in MailDetailView.swift.

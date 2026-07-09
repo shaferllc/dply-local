@@ -232,15 +232,8 @@ pub enum Command {
     },
     /// Inspect captured local mail.
     Mail {
-        /// One of: list, mailboxes, show, clear.
-        #[arg(default_value = "list")]
-        action: String,
-        /// Message id (for show).
-        id: Option<String>,
-        /// Restrict list/clear to one mailbox. A site's mailbox is its
-        /// `MAIL_USERNAME`; use `-` for mail that arrived without a username.
-        #[arg(long)]
-        mailbox: Option<String>,
+        #[command(subcommand)]
+        command: Option<MailCmd>,
     },
     /// Manage the background daemon service (autostart on login).
     Daemon {
@@ -306,6 +299,69 @@ pub enum ValetCmd {
         /// Remove an explicit selection from a JSON manifest.
         #[arg(long)]
         manifest: Option<String>,
+    },
+}
+
+/// Captured-mail operations. `dpl mail` with no subcommand lists the inbox.
+///
+/// A message's mailbox is the SMTP username its sender authenticated with — set
+/// `MAIL_USERNAME=<site>` in a project's `.env`. Use `-` to select mail that
+/// arrived without one.
+#[derive(Subcommand)]
+pub enum MailCmd {
+    /// List captured messages (the default with no subcommand).
+    List {
+        /// Only this mailbox (`-` for mail with no username).
+        #[arg(long)]
+        mailbox: Option<String>,
+        /// Match against subject, sender, recipient and body text.
+        #[arg(long)]
+        search: Option<String>,
+    },
+    /// List mailboxes and how many messages each holds.
+    Mailboxes,
+    /// Print a message. Defaults to the raw source.
+    Show {
+        id: String,
+        /// Which representation: raw | html | text | headers.
+        #[arg(long, default_value = "raw")]
+        part: String,
+    },
+    /// List a message's attachments.
+    Attachments { id: String },
+    /// Save one attachment to disk (index from `dpl mail attachments`).
+    Save {
+        id: String,
+        index: usize,
+        /// Destination file, or a directory to save into. Defaults to `.`.
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Print every link in a message — password resets, verification URLs.
+    Links { id: String },
+    /// Send a test message into the sink, to check wiring or exercise the viewer.
+    Send {
+        #[arg(long, default_value = "dev@local.test")]
+        to: String,
+        #[arg(long, default_value = "dpl@local.test")]
+        from: String,
+        #[arg(long, default_value = "Test message from dpl")]
+        subject: String,
+        /// Authenticate as this mailbox (i.e. pretend to be that site).
+        #[arg(long)]
+        mailbox: Option<String>,
+        /// Send a multipart HTML message rather than plain text.
+        #[arg(long)]
+        html: bool,
+        /// Body text (a sample with a reset link is used when omitted).
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// Delete captured messages.
+    Clear {
+        /// Only this mailbox (`-` for mail with no username).
+        #[arg(long)]
+        mailbox: Option<String>,
     },
 }
 
