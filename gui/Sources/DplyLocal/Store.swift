@@ -572,7 +572,7 @@ final class Store: ObservableObject {
             if let r = await background({ try cli.rows(["services"]) }) { dbServices = r }
             await loadVersions()
         case .mail:
-            if let r = await background({ try cli.rows(["mail", "list"]) }) { mailMessages = r }
+            await loadMail()
         case .dumps:
             break // dumps arrive via the live stream, not a refresh
         case .status, .doctor:
@@ -991,10 +991,46 @@ final class Store: ObservableObject {
         if site == nil { await loadPhpVersions() } // menu-bar default changed
     }
 
+    /// Mailbox counts from `dpl mail mailboxes`, for the switcher.
+    @Published var mailboxes: [Row] = []
+    /// Which mailbox the list is showing; `nil` means all of them.
+    @Published var mailboxFilter: String? = nil
+
+    /// The mailbox name the sink uses for mail that arrived without an SMTP
+    /// username. Matches `UNATTRIBUTED` in the CLI.
+    static let unattributedMailbox = "-"
+
+    /// Display name for a mailbox: sites use their `MAIL_USERNAME` verbatim.
+    static func mailboxLabel(_ name: String) -> String {
+        name == unattributedMailbox ? "No username" : name
+    }
+
+    func loadMail() async {
+        let cli = self.cli
+        let filter = mailboxFilter
+        var args = ["mail", "list"]
+        if let filter { args += ["--mailbox", filter] }
+        if let r = await background({ try cli.rows(args) }) { mailMessages = r }
+        // Counts always cover every mailbox, so the switcher can show the ones
+        // the current filter is hiding.
+        if let m = await background({ try cli.rows(["mail", "mailboxes"]) }) { mailboxes = m }
+    }
+
+    func selectMailbox(_ name: String?) async {
+        mailboxFilter = name
+        await loadMail()
+    }
+
+    /// Clear the visible mailbox, or everything when no filter is active.
     func clearMail() async {
         let cli = self.cli
-        _ = await background { try cli.runRaw(["mail", "clear"]) }
-        if let r = await background({ try cli.rows(["mail", "list"]) }) { mailMessages = r }
+        let filter = mailboxFilter
+        var args = ["mail", "clear"]
+        if let filter { args += ["--mailbox", filter] }
+        _ = await background { try cli.runRaw(args) }
+        // The mailbox may no longer exist once emptied.
+        if filter != nil { mailboxFilter = nil }
+        await loadMail()
     }
 
     /// Raw body of one captured message (for the reader pane).

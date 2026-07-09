@@ -118,7 +118,9 @@ fn run() -> Result<()> {
         Command::Db { action, name, engine, port, file } => {
             commands::local::db(home.as_deref(), action, engine, name, port, file)
         }
-        Command::Mail { action, id } => commands::local::mail(home.as_deref(), action, id, args.json),
+        Command::Mail { action, id, mailbox } => {
+            commands::local::mail(home.as_deref(), action, id, mailbox, args.json)
+        }
         Command::Daemon { action } => commands::daemon::manage(home.as_deref(), action),
         Command::Tld { action, name } => commands::local::tld(home.as_deref(), action, name, args.json),
         Command::Version => {

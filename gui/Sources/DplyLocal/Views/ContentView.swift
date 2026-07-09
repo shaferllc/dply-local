@@ -397,7 +397,8 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "trash")
                 }
-                .help("Clear all captured mail")
+                .help(store.mailboxFilter.map { "Clear the \(Store.mailboxLabel($0)) mailbox" }
+                    ?? "Clear all captured mail")
             }
         }
         if store.section == .dumps && !store.dumps.isEmpty {

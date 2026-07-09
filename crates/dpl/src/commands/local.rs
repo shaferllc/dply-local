@@ -850,31 +850,82 @@ pub fn db(home: Option<&str>, action: String, engine: String, name: Option<Strin
 }
 
 /// Inspect captured mail (filesystem-based; no daemon call).
-pub fn mail(home: Option<&str>, action: String, id: Option<String>, json: bool) -> Result<()> {
+/// The mailbox name shown for mail that arrived without an SMTP username, and
+/// the value `--mailbox` takes to select it.
+const UNATTRIBUTED: &str = "-";
+
+pub fn mail(
+    home: Option<&str>,
+    action: String,
+    id: Option<String>,
+    mailbox: Option<String>,
+    json: bool,
+) -> Result<()> {
     let dir = dpl_core::paths::mail_dir(home)?;
     match action.as_str() {
         "list" => {
-            let mut files = eml_files(&dir)?;
-            files.sort();
-            files.reverse(); // newest first
+            let messages = messages_in(&dir, mailbox.as_deref())?;
             if json {
-                let arr: Vec<_> = files.iter().map(|f| {
-                    let id = f.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                    let (from, to, subject) = mail_headers(f);
-                    serde_json::json!({ "id": id, "from": from, "to": to, "subject": subject })
-                }).collect();
+                let arr: Vec<_> = messages
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "id": m.id,
+                            "from": m.from,
+                            "to": m.to,
+                            "subject": m.subject,
+                            "mailbox": m.mailbox,
+                        })
+                    })
+                    .collect();
                 println!("{}", serde_json::to_string_pretty(&arr)?);
                 return Ok(());
             }
-            if files.is_empty() {
-                println!("No captured mail. Point your app's SMTP at 127.0.0.1:1025.");
+            if messages.is_empty() {
+                match mailbox.as_deref() {
+                    Some(m) => println!("No captured mail in mailbox `{m}`."),
+                    None => println!(
+                        "No captured mail. Point your app's SMTP at 127.0.0.1:1025 and set \
+                         MAIL_USERNAME=<site> to file it under that site."
+                    ),
+                }
                 return Ok(());
             }
-            println!("{:<24}  {:<26}  SUBJECT", "ID", "TO");
-            for f in files {
-                let id = f.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                let (_from, to, subject) = mail_headers(&f);
-                println!("{id:<24}  {:<26}  {subject}", truncate(&to, 26));
+            println!("{:<24}  {:<14}  {:<26}  SUBJECT", "ID", "MAILBOX", "TO");
+            for m in messages {
+                println!(
+                    "{:<24}  {:<14}  {:<26}  {}",
+                    m.id,
+                    truncate(&m.mailbox, 14),
+                    truncate(&m.to, 26),
+                    m.subject
+                );
+            }
+            Ok(())
+        }
+        "mailboxes" => {
+            let messages = messages_in(&dir, None)?;
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            for m in &messages {
+                *counts.entry(m.mailbox.clone()).or_default() += 1;
+            }
+            if json {
+                let arr: Vec<_> = counts
+                    .iter()
+                    .map(|(name, count)| serde_json::json!({ "name": name, "count": count }))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&arr)?);
+                return Ok(());
+            }
+            if counts.is_empty() {
+                println!("No captured mail yet.");
+                return Ok(());
+            }
+            println!("{:<20}  MESSAGES", "MAILBOX");
+            println!("{:<20}  {}", "(all)", messages.len());
+            for (name, count) in counts {
+                let label = if name == UNATTRIBUTED { "(no username)" } else { &name };
+                println!("{label:<20}  {count}");
             }
             Ok(())
         }
@@ -887,16 +938,46 @@ pub fn mail(home: Option<&str>, action: String, id: Option<String>, json: bool) 
             Ok(())
         }
         "clear" => {
-            let files = eml_files(&dir)?;
-            let n = files.len();
-            for f in files {
-                let _ = std::fs::remove_file(f);
+            let messages = messages_in(&dir, mailbox.as_deref())?;
+            let n = messages.len();
+            for m in messages {
+                let _ = std::fs::remove_file(&m.path);
             }
-            println!("Cleared {n} message(s).");
+            match mailbox.as_deref() {
+                Some(m) => println!("Cleared {n} message(s) from mailbox `{m}`."),
+                None => println!("Cleared {n} message(s)."),
+            }
             Ok(())
         }
-        other => anyhow::bail!("unknown mail action: {other} (list|show|clear)"),
+        other => anyhow::bail!("unknown mail action: {other} (list|mailboxes|show|clear)"),
     }
+}
+
+/// One captured message's list-view metadata.
+struct MailMessage {
+    path: std::path::PathBuf,
+    id: String,
+    from: String,
+    to: String,
+    subject: String,
+    mailbox: String,
+}
+
+/// Every captured message, newest first, optionally restricted to one mailbox.
+fn messages_in(dir: &std::path::Path, mailbox: Option<&str>) -> Result<Vec<MailMessage>> {
+    let mut files = eml_files(dir)?;
+    files.sort();
+    files.reverse(); // newest first
+
+    Ok(files
+        .into_iter()
+        .map(|path| {
+            let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let h = mail_headers(&path);
+            MailMessage { path, id, from: h.from, to: h.to, subject: h.subject, mailbox: h.mailbox }
+        })
+        .filter(|m| mailbox.is_none_or(|want| m.mailbox == want))
+        .collect())
 }
 
 fn eml_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
@@ -912,12 +993,24 @@ fn eml_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
     Ok(out)
 }
 
-/// Pull From + To + Subject from an .eml for the list view.
-fn mail_headers(path: &std::path::Path) -> (String, String, String) {
+/// Headers we surface in the list view.
+struct MailHeaders {
+    from: String,
+    to: String,
+    subject: String,
+    /// The `X-Dpl-Mailbox` value, or [`UNATTRIBUTED`] when the message arrived
+    /// without an SMTP username — which is also true of every message captured
+    /// before mailboxes existed.
+    mailbox: String,
+}
+
+/// Pull From + To + Subject + mailbox from an `.eml` for the list view.
+fn mail_headers(path: &std::path::Path) -> MailHeaders {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     let mut from = String::new();
     let mut to = String::new();
     let mut subject = String::new();
+    let mut mailbox = String::new();
     for line in content.lines() {
         if line.is_empty() {
             break; // end of headers
@@ -930,9 +1023,14 @@ fn mail_headers(path: &std::path::Path) -> (String, String, String) {
             to = value();
         } else if subject.is_empty() && lower.starts_with("subject:") {
             subject = value();
+        } else if mailbox.is_empty() && lower.starts_with("x-dpl-mailbox:") {
+            mailbox = value();
         }
     }
-    (from, to, subject)
+    if mailbox.is_empty() {
+        mailbox = UNATTRIBUTED.to_string();
+    }
+    MailHeaders { from, to, subject, mailbox }
 }
 
 fn truncate(s: &str, n: usize) -> String {

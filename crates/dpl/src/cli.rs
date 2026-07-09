@@ -232,11 +232,15 @@ pub enum Command {
     },
     /// Inspect captured local mail.
     Mail {
-        /// One of: list, show, clear.
+        /// One of: list, mailboxes, show, clear.
         #[arg(default_value = "list")]
         action: String,
         /// Message id (for show).
         id: Option<String>,
+        /// Restrict list/clear to one mailbox. A site's mailbox is its
+        /// `MAIL_USERNAME`; use `-` for mail that arrived without a username.
+        #[arg(long)]
+        mailbox: Option<String>,
     },
     /// Manage the background daemon service (autostart on login).
     Daemon {
