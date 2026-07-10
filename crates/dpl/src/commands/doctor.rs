@@ -306,6 +306,11 @@ fn check_networking(c: &mut Checks, home: Option<&str>, http_port: Option<u16>) 
         c.add("net.resolution", cat, "Resolution mode", Status::Info, "wildcard DNS resolver");
         c.hint("A local DNS resolver disables iCloud Private Relay. Switch to hosts mode to keep it on.");
         for tld in &tlds {
+            // .localhost is resolved to loopback by the OS — no /etc/resolver needed.
+            if dpl_core::config::is_native_tld(tld) {
+                c.add(&format!("net.resolver.{tld}"), cat, &format!("Resolver .{tld}"), Status::Pass, "native — resolves to loopback, no resolver needed");
+                continue;
+            }
             let path = format!("/etc/resolver/{tld}");
             if Path::new(&path).exists() {
                 c.add(&format!("net.resolver.{tld}"), cat, &format!("Resolver .{tld}"), Status::Pass, path);

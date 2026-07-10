@@ -878,6 +878,11 @@ pub fn setup(home: Option<&str>, ports: bool, as_user: Option<&str>) -> Result<(
     println!("This runs the privileged helper via sudo — you may be prompted for your password.\n");
 
     for tld in &tlds {
+        // .localhost resolves to loopback on its own — no resolver, no sudo.
+        if dpl_core::config::is_native_tld(tld) {
+            println!("  .{tld} resolves to loopback natively — skipping the resolver.");
+            continue;
+        }
         sudo(&helper, &["install-resolver", tld, "5333"])?;
     }
     sudo(&helper, &["trust-ca", &ca.to_string_lossy()])?;
@@ -1215,6 +1220,9 @@ pub fn resolution(home: Option<&str>, mode: Option<String>) -> Result<()> {
             let _ = daemon::call(Request::SetResolution { mode: "resolver".into() }, home)?;
             let _ = sudo(&helper, &["remove-sudoers"]);
             for tld in &tlds {
+                if dpl_core::config::is_native_tld(tld) {
+                    continue;
+                }
                 sudo(&helper, &["install-resolver", tld, "5333"])?;
             }
             println!("✓ Back to wildcard DNS resolution for .test.");

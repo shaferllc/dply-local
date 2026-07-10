@@ -19,6 +19,13 @@ use crate::error::{CoreError, Result};
 /// The default TLD local sites answer on when none is configured.
 pub const SITE_TLD: &str = "test";
 
+/// TLDs the operating system already resolves to loopback (RFC 6761), so dpl
+/// needs no `/etc/resolver` entry and no sudo for them — the `*.localhost`
+/// opt-out. `<name>.localhost` reaches dpl on :80 with zero DNS setup.
+pub fn is_native_tld(tld: &str) -> bool {
+    tld.eq_ignore_ascii_case("localhost")
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LocalConfig {
