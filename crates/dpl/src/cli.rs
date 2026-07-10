@@ -154,11 +154,15 @@ pub enum Command {
         #[arg(long)]
         remote: Option<String>,
     },
-    /// One-time privileged setup: trust the CA, route .test, redirect :80/:443.
+    /// One-time privileged setup: trust the CA, route .test, claim :80/:443.
     Setup {
-        /// Skip the :80/:443 port redirect (sites stay on :8080/:8443).
+        /// Don't claim :80/:443 (sites stay on :8080/:8443).
         #[arg(long)]
         no_ports: bool,
+        /// Install for this user. Needed when setup itself runs as root (the GUI's
+        /// authorization prompt), where neither USER nor SUDO_USER names a human.
+        #[arg(long, value_name = "NAME")]
+        as_user: Option<String>,
     },
     /// Set a linked site's runtime (fpm or an already-installed Octane server).
     Runtime {

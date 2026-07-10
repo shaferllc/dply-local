@@ -11,6 +11,7 @@ mod dns;
 mod dumps;
 mod fastcgi;
 mod fpm;
+mod launchd;
 mod mail;
 mod proxy;
 mod registry;
@@ -38,13 +39,24 @@ fn main() -> anyhow::Result<()> {
         .context("building tokio runtime")?;
 
     rt.block_on(async {
+        // Before anything destructive: if another dpld owns the control socket,
+        // this process must not run. `kill_orphans()` below reaps php-fpm masters
+        // by command-line pattern and would tear down the *live* daemon's pools,
+        // leaving every site 502 while launchd respawns us into the same collision.
+        if server::instance_already_running().await {
+            anyhow::bail!(
+                "another dpld already owns the control socket — refusing to start \
+                 (stop it first, e.g. `dpl stop`)"
+            );
+        }
+
         // Bind the proxy first so we know which port we actually got.
         let (listener, http_port) = proxy::bind_preferred().await?;
         tracing::info!(port = http_port, "proxy listening");
         if http_port != 80 {
             tracing::warn!(
-                "serving on :{http_port}. Run `dpl setup` (sudo) once to route .test and \
-                 redirect :80/:443, then browse http://<name>.test with no port."
+                "serving on :{http_port}. Run `dpl setup` (sudo) once to route .test and hand \
+                 :80/:443 to this daemon via launchd, then browse http://<name>.test with no port."
             );
         }
 

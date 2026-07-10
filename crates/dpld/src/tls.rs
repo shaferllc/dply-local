@@ -92,8 +92,13 @@ pub async fn serve(registry: Arc<Mutex<Registry>>) -> Result<()> {
     }
 }
 
-/// Bind HTTPS, preferring 443 then 8443.
+/// Bind HTTPS: the launchd-activated socket if `dpl setup` installed the
+/// LaunchDaemon, else 443 then 8443. Mirrors `proxy::bind_preferred`.
 async fn bind_preferred() -> Result<(TcpListener, u16)> {
+    if let Some((listener, port)) = crate::launchd::activated_listener("https") {
+        tracing::debug!(port, "adopted the https socket from launchd");
+        return Ok((listener, port));
+    }
     let preferred = std::env::var("DPL_HTTPS_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(443);
     for port in [preferred, 8443] {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));

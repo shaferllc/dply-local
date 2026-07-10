@@ -25,6 +25,19 @@ pub struct DaemonState {
     pub http_port: u16,
 }
 
+/// Whether a live dpld already owns the control socket.
+///
+/// Startup does destructive things — `kill_orphans()` reaps php-fpm masters by
+/// pattern, which cannot tell *our* orphans from another daemon's live pools.
+/// A second instance must therefore find this out and bail *before* it touches
+/// anything, not when it finally gets around to binding the socket.
+pub async fn instance_already_running() -> bool {
+    match dpl_core::paths::daemon_socket(None) {
+        Ok(path) => path.exists() && probe_alive(&path).await,
+        Err(_) => false,
+    }
+}
+
 /// Bind the socket and serve until a `Shutdown` request (or SIGINT/SIGTERM)
 /// arrives. Cleans up a stale socket file left by a previous crash.
 pub async fn run(state: DaemonState) -> anyhow::Result<()> {

@@ -233,7 +233,10 @@ fn check_networking(c: &mut Checks, home: Option<&str>, http_port: Option<u16>) 
                     c.fix("Take over ports 80/443", "dpl takeover");
                 }
             }
-            Some(_) => c.add("net.port_80", cat, "Port 80/443", Status::Pass, "served by dpl via the redirect"),
+            Some(_) => c.add("net.port_80", cat, "Port 80/443", Status::Pass, "served by dpl"),
+            // On macOS the "Privileged ports" check below owns this story; saying
+            // it twice just makes the report look like two problems.
+            None if cfg!(target_os = "macos") => {}
             None => {
                 c.add("net.port_80", cat, "Port 80", Status::Warn, "nothing is listening");
                 c.hint(format!("Sites work at http://<name>.test:{http_port}, but not on the clean port-less URL.").as_str());
@@ -242,13 +245,36 @@ fn check_networking(c: &mut Checks, home: Option<&str>, http_port: Option<u16>) 
         }
     }
 
-    // The pf redirect that makes the clean :80 URL work (macOS).
+    // Who owns :80/:443. When the LaunchDaemon is installed, launchd binds them and
+    // hands the descriptors to dpld — so `http_port == 80` is itself the proof it
+    // worked, and a daemon on 8080 means the plist is there but didn't take.
     if cfg!(target_os = "macos") {
+        let installed = Path::new("/Library/LaunchDaemons/com.dply.dpld.plist").exists();
+        match (installed, http_port == 80) {
+            (true, true) => {
+                c.add("net.privports", cat, "Privileged ports", Status::Pass, ":80/:443 handed over by launchd");
+            }
+            (true, false) => {
+                c.add("net.privports", cat, "Privileged ports", Status::Warn, format!("LaunchDaemon installed, but dpld is on :{http_port}"));
+                c.hint("The daemon didn't get the launchd sockets — a stray LaunchAgent copy of dpld may have started first.");
+                c.fix("Reinstall the port daemon", "sudo dpl setup");
+            }
+            (false, false) => {
+                c.add("net.privports", cat, "Privileged ports", Status::Warn, "not installed");
+                c.hint(format!("Sites work at http://<name>.test:{http_port}, but not on the clean port-less URL.").as_str());
+                c.fix("Run privileged setup", "sudo dpl setup");
+            }
+            (false, true) => {
+                c.add("net.privports", cat, "Privileged ports", Status::Pass, "dpld is serving :80 directly");
+            }
+        }
+
+        // An anchor left over from the pf era is dead weight, and misleads anyone
+        // debugging why :80 behaves oddly.
         if Path::new("/etc/pf.anchors/dpl").exists() {
-            c.add("net.portmap", cat, "Port redirect", Status::Pass, ":80 → :8080, :443 → :8443 (pf anchor installed)");
-        } else {
-            c.add("net.portmap", cat, "Port redirect", Status::Warn, "pf anchor not installed");
-            c.fix("Run privileged setup", "sudo dpl setup");
+            c.add("net.pf_legacy", cat, "Legacy pf redirect", Status::Warn, "/etc/pf.anchors/dpl is still present");
+            c.hint("dpl no longer uses pf. The anchor does nothing now, but a stale rdr rule can still capture :80.");
+            c.fix("Clean it up", "sudo dpl setup");
         }
     }
 

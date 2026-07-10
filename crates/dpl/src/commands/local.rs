@@ -849,9 +849,26 @@ pub fn db(home: Option<&str>, action: String, engine: String, name: Option<Strin
     }
 }
 
-/// One-time privileged setup: route `.test`, trust the CA, and (optionally)
-/// redirect :80/:443 so sites are reachable at clean `http://<name>.test`.
-pub fn setup(home: Option<&str>, ports: bool) -> Result<()> {
+/// One-time privileged setup: route `.test`, trust the CA, and (optionally) hand
+/// :80/:443 to the daemon so sites are reachable at clean `http://<name>.test`.
+pub fn setup(home: Option<&str>, ports: bool, as_user: Option<&str>) -> Result<()> {
+    // Guard before anything resolves a path: `--as-user root` would point the CA,
+    // the resolver list and the daemon at /var/root. Every code path here is about
+    // configuring a *human's* environment.
+    if as_user == Some("root") {
+        anyhow::bail!("`--as-user root` is not a thing — pass the login user dpl should serve.");
+    }
+
+    // Run as root on someone's behalf (the GUI's authorization prompt), `$HOME` is
+    // /var/root — so the CA, the TLD list and the control socket would all resolve
+    // to the wrong place. Pin every path to the target user's home instead.
+    #[cfg(target_os = "macos")]
+    let resolved_home: Option<String> =
+        if home.is_none() { as_user.map(home_of).transpose()? } else { None };
+    #[cfg(not(target_os = "macos"))]
+    let resolved_home: Option<String> = None;
+    let home = home.or(resolved_home.as_deref());
+
     let helper = helper_path()?;
     let ca = dpl_core::paths::certs_dir(home)?.join("ca.pem");
     if !ca.exists() {
@@ -865,14 +882,160 @@ pub fn setup(home: Option<&str>, ports: bool) -> Result<()> {
     }
     sudo(&helper, &["trust-ca", &ca.to_string_lossy()])?;
     if ports {
-        sudo(&helper, &["install-portmap", "8080", "8443"])?;
-        println!("\n✓ Setup complete. Restart the daemon with the redirect ports:");
-        println!("    DPL_HTTP_PORT=8080 DPL_HTTPS_PORT=8443 dpld");
-        println!("  then browse to http://<name>.test (and https://<name>.test).");
+        install_privileged_ports(&helper, as_user)?;
+        println!("\n✓ Setup complete. launchd owns :80/:443 and hands them to dpld.");
+        println!("  Browse to http://<name>.test (and https://<name>.test) — no port needed.");
     } else {
-        println!("\n✓ Setup complete (no port redirect). Sites are at http://<name>.test:8080 and https://<name>.test:8443.");
+        println!("\n✓ Setup complete (no privileged ports). Sites are at http://<name>.test:8080 and https://<name>.test:8443.");
     }
     Ok(())
+}
+
+/// Hand :80/:443 to the daemon.
+///
+/// On macOS a LaunchDaemon owns the sockets and passes them to `dpld` running as
+/// the user, so the per-user LaunchAgent has to go first — two daemons would race
+/// for the same control socket and php-fpm pools.
+#[cfg(target_os = "macos")]
+fn install_privileged_ports(helper: &std::path::Path, as_user: Option<&str>) -> Result<()> {
+    let (user, uid) = target_user(as_user)?;
+    let home = home_of(&user)?;
+    let dpld = dpld_path()?;
+
+    // Order matters. Any daemon already installed goes first: it has KeepAlive, so
+    // the moment we stop the agent launchd would start it into the gap — and if an
+    // earlier run wrote `UserName=root`, that copy scatters root-owned files through
+    // ~/.dpl before we ever get to rewrite the plist.
+    let _ = sudo(helper, &["remove-socketd"]);
+
+    // Then the agent. Deleting its plist isn't enough — the running process keeps
+    // going until it's booted out of *the user's* GUI domain, and both daemons would
+    // otherwise fight over the control socket and the php-fpm pools.
+    stop_launch_agent(&user, uid);
+
+    sudo(helper, &["install-socketd", &user, &home, &dpld.to_string_lossy()])?;
+    Ok(())
+}
+
+/// The human this daemon serves, even when `dpl setup` was run under `sudo`.
+///
+/// `USER`/`HOME` describe root in that case, and baking `UserName=root` into the
+/// plist would run dpld — and every php-fpm pool — as root, salting `~/.dpl` with
+/// root-owned files.
+#[cfg(target_os = "macos")]
+fn target_user(as_user: Option<&str>) -> Result<(String, u32)> {
+    // `--as-user` first: the GUI's authorization prompt runs us as root outright,
+    // so neither USER nor SUDO_USER names a human there.
+    let user = match as_user {
+        Some(u) => u.to_string(),
+        None => std::env::var("SUDO_USER")
+            .or_else(|_| std::env::var("USER"))
+            .context("neither SUDO_USER nor USER is set")?,
+    };
+    if user == "root" {
+        anyhow::bail!(
+            "refusing to install the daemon as root. Run `dpl setup` as your own user \
+             (it asks for a password when it needs one), or pass `--as-user <name>`."
+        );
+    }
+    let uid = uid_of(&user)
+        .or_else(|| std::env::var("SUDO_UID").ok().and_then(|s| s.parse().ok()))
+        .context("could not determine the target user's uid")?;
+    Ok((user, uid))
+}
+
+/// Whether this process is already root (via `sudo`, or the GUI's authorization
+/// prompt, which grants root without setting any `SUDO_*` variables).
+#[cfg(target_os = "macos")]
+fn running_as_root() -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn uid_of(user: &str) -> Option<u32> {
+    let out = std::process::Command::new("id").args(["-u", user]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// The user's real home, not whatever `HOME` says after `sudo`.
+#[cfg(target_os = "macos")]
+fn home_of(user: &str) -> Result<String> {
+    let out = std::process::Command::new("dscl")
+        .args([".", "-read", &format!("/Users/{user}"), "NFSHomeDirectory"])
+        .output()
+        .context("reading the user's home directory")?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace()
+        .last()
+        .filter(|h| h.starts_with('/'))
+        .map(str::to_string)
+        .context("could not resolve the user's home directory")
+}
+
+/// Boot the per-user agent out of its GUI domain, remove its plist, and make sure
+/// the process is really gone.
+///
+/// `bootout` only reaches jobs launchd still knows about. A dpld started by hand,
+/// or one whose plist was already deleted, keeps holding the control socket — and
+/// the incoming LaunchDaemon would refuse to start forever. So we finish the job
+/// over the control socket, which works no matter how the process was born.
+#[cfg(target_os = "macos")]
+fn stop_launch_agent(user: &str, uid: u32) {
+    let target = format!("gui/{uid}/com.tomshafer.dpld");
+    // As root we must re-enter the user's domain; as the user, `launchctl` is enough.
+    // Ask the kernel rather than inferring from SUDO_USER — the GUI's authorization
+    // prompt makes us root without ever setting it.
+    let booted_out = if running_as_root() {
+        std::process::Command::new("sudo").args(["-u", user, "launchctl", "bootout", &target]).status()
+    } else {
+        std::process::Command::new("launchctl").args(["bootout", &target]).status()
+    };
+    if matches!(booted_out, Ok(s) if s.success()) {
+        println!("  Stopped the per-user LaunchAgent — the LaunchDaemon supersedes it.");
+    }
+    if let Some(agent) = launch_agent_path(user) {
+        let _ = std::fs::remove_file(&agent);
+    }
+
+    // Still answering? Ask it to shut down. The socket lives under the *user's*
+    // home — as root, `None` here would probe /var/root and find nothing.
+    let home = home_of(user).ok();
+    if crate::daemon::call(dpl_core::ipc::Request::Ping, home.as_deref()).is_ok() {
+        let _ = crate::daemon::call(dpl_core::ipc::Request::Shutdown, home.as_deref());
+        println!("  Asked the running dpld to shut down.");
+        std::thread::sleep(std::time::Duration::from_millis(700));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_privileged_ports(helper: &std::path::Path) -> Result<()> {
+    sudo(helper, &["install-portmap", "8080", "8443"])?;
+    println!("    Restart the daemon with DPL_HTTP_PORT=8080 DPL_HTTPS_PORT=8443.");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_path(user: &str) -> Option<std::path::PathBuf> {
+    home_of(user)
+        .ok()
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join("Library/LaunchAgents/com.tomshafer.dpld.plist"))
+}
+
+/// The `dpld` sitting next to this `dpl`, which is what the LaunchDaemon runs.
+#[cfg(target_os = "macos")]
+fn dpld_path() -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe().context("locating the dpl binary")?;
+    let dpld = exe.with_file_name("dpld");
+    if !dpld.is_file() {
+        anyhow::bail!("dpld not found next to dpl at {}", dpld.display());
+    }
+    dpld.canonicalize().context("resolving the dpld path")
 }
 
 /// Take over local `.test` serving from Valet/Apache: stop them so dpl can own
@@ -917,7 +1080,7 @@ pub fn takeover(home: Option<&str>) -> Result<()> {
 
     // 5) Install dpl's resolver, trust the CA, redirect :80/:443.
     println!("\n• Configuring dpl (resolver, trusted HTTPS, :80/:443 redirect)…");
-    setup(home, true)?;
+    setup(home, true, None)?;
 
     // 6) Restart the daemon so it rebinds cleanly.
     println!("\n• Restarting the dpl daemon…");

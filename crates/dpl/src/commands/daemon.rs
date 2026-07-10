@@ -98,8 +98,31 @@ fn uninstall() -> Result<()> {
     Ok(())
 }
 
+/// After `dpl setup`, dpld runs as a system LaunchDaemon so launchd can bind
+/// :80/:443 for it. That job lives in the system domain, so driving it needs
+/// root — hence `sudo launchctl` rather than the plain user-domain calls the
+/// LaunchAgent took.
+#[cfg(target_os = "macos")]
+const SOCKETD_LABEL: &str = "com.dply.dpld";
+#[cfg(target_os = "macos")]
+const SOCKETD_PLIST: &str = "/Library/LaunchDaemons/com.dply.dpld.plist";
+
+#[cfg(target_os = "macos")]
+fn socketd_installed() -> bool {
+    std::path::Path::new(SOCKETD_PLIST).exists()
+}
+
 #[cfg(target_os = "macos")]
 fn start() -> Result<()> {
+    if socketd_installed() {
+        let target = format!("system/{SOCKETD_LABEL}");
+        // Already bootstrapped? Then kickstart it instead of erroring.
+        if run_interactive("sudo", &["launchctl", "bootstrap", "system", SOCKETD_PLIST]).is_err() {
+            run_interactive("sudo", &["launchctl", "kickstart", &target])?;
+        }
+        println!("✓ Started dpld (LaunchDaemon, owns :80/:443).");
+        return Ok(());
+    }
     let path = plist_path()?;
     // Load the agent (KeepAlive + RunAtLoad start it); if it's already loaded,
     // kick it with `start`.
@@ -112,6 +135,13 @@ fn start() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn stop() -> Result<()> {
+    if socketd_installed() {
+        // KeepAlive is on, so `stop` would just respawn it — boot it out of the
+        // system domain to actually stop it. It comes back on reboot or `start`.
+        run_interactive("sudo", &["launchctl", "bootout", &format!("system/{SOCKETD_LABEL}")])?;
+        println!("✓ Stopped dpld (LaunchDaemon).");
+        return Ok(());
+    }
     // The agent sets KeepAlive, so `launchctl stop` just triggers a respawn —
     // unload the agent to actually stop it (it reloads on next login / `start`).
     let path = plist_path()?;
@@ -122,8 +152,17 @@ fn stop() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn status() -> Result<()> {
+    if socketd_installed() {
+        // `launchctl list` only shows the caller's own domain, so a user can't see
+        // a system job here. Report what we can check without sudo, and point at
+        // the command that actually probes the running daemon.
+        println!("dpld LaunchDaemon: installed (owns :80/:443)");
+        println!("  Run `dpl status` to see whether it's up.");
+        return Ok(());
+    }
     let out = std::process::Command::new("launchctl").arg("list").output()?;
-    let listed = String::from_utf8_lossy(&out.stdout).lines().any(|l| l.contains(LABEL));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let listed = text.lines().any(|l| l.contains(LABEL));
     println!("dpld LaunchAgent: {}", if listed { "loaded" } else { "not installed" });
     Ok(())
 }
@@ -197,7 +236,20 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
     }
 }
 
+/// Like `run`, but leaves stdin/stdout attached to the terminal. `run` captures
+/// output, which nulls stdin — `sudo` then has nowhere to prompt for a password
+/// and fails with "a terminal is required".
+#[cfg(target_os = "macos")]
+fn run_interactive(program: &str, args: &[&str]) -> Result<()> {
+    let status = std::process::Command::new(program).args(args).status()
+        .with_context(|| format!("running {program}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("{program} {} failed", args.join(" "))
+    }
+}
+
 fn which(name: &str) -> Option<String> {
-    let out = std::process::Command::new("/usr/bin/env").arg("which").arg(name).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
+    dpl_core::tools::which(name).map(|p| p.to_string_lossy().into_owned())
 }

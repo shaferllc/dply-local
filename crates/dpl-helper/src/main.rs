@@ -8,8 +8,10 @@
 //!   untrust-ca <ca.pem>           remove it
 //!   install-resolver <tld> <port> route *.tld to the local DNS responder
 //!   remove-resolver <tld>         undo it
-//!   install-portmap <http> <https> redirect :80→http and :443→https (macOS pf)
-//!   remove-portmap                undo it
+//!   install-socketd <user> <home> <dpld>  LaunchDaemon owning :80/:443 (macOS)
+//!   remove-socketd                undo it
+//!   install-portmap <http> <https> redirect :80→http and :443→https (Linux)
+//!   remove-portmap                undo it (also tears down a legacy pf anchor)
 //!
 //! macOS is fully implemented; Linux does the trust + a best-effort resolver.
 
@@ -36,6 +38,11 @@ fn main() -> ExitCode {
             _ => Err("usage: install-portmap <http_port> <https_port>".into()),
         },
         Some("remove-portmap") => remove_portmap(),
+        Some("install-socketd") => match (arg(&args, 1), arg(&args, 2), arg(&args, 3)) {
+            (Ok(user), Ok(home), Ok(dpld)) => install_socketd(&user, &home, &dpld),
+            _ => Err("usage: install-socketd <user> <home> <dpld-path>".into()),
+        },
+        Some("remove-socketd") => remove_socketd(),
         Some("sync-hosts") => sync_hosts(&args[1..]),
         Some("clear-hosts") => sync_hosts(&[]),
         Some("install-sudoers") => match (arg(&args, 1), arg(&args, 2)) {
@@ -143,34 +150,167 @@ fn remove_resolver(_tld: &str) -> Result<String, String> {
     Ok("Nothing to remove.".into())
 }
 
-// ---- port 80/443 redirect (macOS pf) ----
+// ---- privileged ports :80/:443 (macOS: launchd socket activation) ----
 
 #[cfg(target_os = "macos")]
-fn install_portmap(http: &str, https: &str) -> Result<String, String> {
-    let http = valid_port(http)?;
-    let https = valid_port(https)?;
-    let anchor = format!(
-        "rdr pass inet proto tcp from any to any port 80 -> 127.0.0.1 port {http}\n\
-         rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port {https}\n"
+const SOCKETD_LABEL: &str = "com.dply.dpld";
+#[cfg(target_os = "macos")]
+const SOCKETD_PLIST: &str = "/Library/LaunchDaemons/com.dply.dpld.plist";
+
+/// Install the LaunchDaemon that owns :80 and :443.
+///
+/// launchd binds both sockets as root at boot, then spawns `dpld` as `user` and
+/// hands over the descriptors. The daemon never runs as root, and there is no
+/// system state left behind that another tool can flush — which is exactly what
+/// went wrong with the pf `rdr` anchor this replaces (any `pfctl -f /etc/pf.conf`
+/// from Docker, a VPN, or a reboot silently dropped the redirect). Any leftover
+/// pf anchor from an older dpl is cleaned up here.
+#[cfg(target_os = "macos")]
+fn install_socketd(user: &str, home: &str, dpld: &str) -> Result<String, String> {
+    valid_user(user)?;
+    // dpld spawns php-fpm pools and writes ~/.dpl. As root it would run every
+    // site's PHP as root and leave root-owned files behind. `dpl setup` run under
+    // `sudo` reports USER=root, so this is a live mistake, not a theoretical one.
+    if user == "root" {
+        return Err("refusing to run dpld as root — pass the login user, not root".into());
+    }
+    let home_path = std::path::Path::new(home);
+    if !home_path.is_absolute() || !home_path.is_dir() {
+        return Err(format!("home must be an absolute existing directory: {home}"));
+    }
+    let dpld_path = std::path::Path::new(dpld);
+    if !dpld_path.is_absolute() || !dpld_path.is_file() {
+        return Err(format!("dpld path must be an absolute existing file: {dpld}"));
+    }
+    // launchd re-reads this plist as root forever; a newline or a stray quote in
+    // a path is the difference between a config value and an injected key.
+    for (what, s) in [("home", home), ("dpld path", dpld)] {
+        if s.chars().any(|c| c.is_control()) {
+            return Err(format!("{what} contains control characters"));
+        }
+    }
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{label}</string>
+    <key>ProgramArguments</key>
+    <array><string>{dpld}</string></array>
+    <!-- launchd (root) binds the sockets, then drops to this user to run dpld. -->
+    <key>UserName</key><string>{user}</string>
+    <key>Sockets</key>
+    <dict>
+        <key>http</key>
+        <dict>
+            <key>SockNodeName</key><string>127.0.0.1</string>
+            <key>SockServiceName</key><string>80</string>
+            <key>SockType</key><string>stream</string>
+            <key>SockFamily</key><string>IPv4</string>
+        </dict>
+        <key>https</key>
+        <dict>
+            <key>SockNodeName</key><string>127.0.0.1</string>
+            <key>SockServiceName</key><string>443</string>
+            <key>SockType</key><string>stream</string>
+            <key>SockFamily</key><string>IPv4</string>
+        </dict>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key><string>{home}</string>
+        <!-- launchd hands us a minimal PATH; add Homebrew so php/php-fpm and
+             the database engines are discoverable. -->
+        <key>PATH</key><string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <!-- Without this a background job is CPU-throttled; it serves web requests. -->
+    <key>ProcessType</key><string>Interactive</string>
+    <key>StandardOutPath</key><string>{home}/.dpl/logs/dpld.out.log</string>
+    <key>StandardErrorPath</key><string>{home}/.dpl/logs/dpld.err.log</string>
+</dict>
+</plist>
+"#,
+        label = SOCKETD_LABEL,
+        dpld = xml_escape(dpld),
+        user = xml_escape(user),
+        home = xml_escape(home),
     );
-    std::fs::write("/etc/pf.anchors/dpl", anchor).map_err(|e| format!("writing pf anchor: {e}"))?;
-    let conf = "rdr-anchor \"dpl\"\nload anchor \"dpl\" from \"/etc/pf.anchors/dpl\"\n";
-    std::fs::write("/etc/pf-dpl.conf", conf).map_err(|e| format!("writing pf conf: {e}"))?;
-    // Load our ruleset and enable pf (already-enabled is fine).
-    run("pfctl", &["-Ef", "/etc/pf-dpl.conf"])
-        .or_else(|_| run("pfctl", &["-f", "/etc/pf-dpl.conf"]))?;
+
+    std::fs::write(SOCKETD_PLIST, plist).map_err(|e| format!("writing {SOCKETD_PLIST}: {e}"))?;
+    // launchd refuses a plist that is group- or world-writable.
+    let _ = run("chown", &["root:wheel", SOCKETD_PLIST]);
+    let _ = run("chmod", &["0644", SOCKETD_PLIST]);
+
+    // Replace any running copy, then start it. `bootstrap` is the modern spelling;
+    // fall back to `load -w` on older systems.
+    let target = format!("system/{SOCKETD_LABEL}");
+    let _ = run("launchctl", &["bootout", &target]);
+    run("launchctl", &["bootstrap", "system", SOCKETD_PLIST])
+        .or_else(|_| run("launchctl", &["load", "-w", SOCKETD_PLIST]))?;
+    let _ = run("launchctl", &["enable", &target]);
+
+    let pf = remove_portmap_files();
     Ok(format!(
-        ":80 → 127.0.0.1:{http} and :443 → 127.0.0.1:{https} redirect installed. \
-         Run dpld with DPL_HTTP_PORT={http} DPL_HTTPS_PORT={https}."
+        ":80 and :443 are now bound by launchd and handed to dpld as {user}.{pf} \
+         Sites are reachable at http://<name>.test with no port."
     ))
 }
 
 #[cfg(target_os = "macos")]
-fn remove_portmap() -> Result<String, String> {
+fn remove_socketd() -> Result<String, String> {
+    let target = format!("system/{SOCKETD_LABEL}");
+    let _ = run("launchctl", &["bootout", &target]);
+    let _ = run("launchctl", &["unload", "-w", SOCKETD_PLIST]);
+    let _ = std::fs::remove_file(SOCKETD_PLIST);
+    Ok("Removed the :80/:443 LaunchDaemon. Sites fall back to :8080/:8443.".into())
+}
+
+/// Tear down the pf redirect a pre-launchd dpl may have left behind. Reported so
+/// an upgrading user can see the old mechanism go away.
+#[cfg(target_os = "macos")]
+fn remove_portmap_files() -> String {
+    let had_anchor = std::path::Path::new("/etc/pf.anchors/dpl").exists();
     let _ = std::fs::remove_file("/etc/pf.anchors/dpl");
     let _ = std::fs::remove_file("/etc/pf-dpl.conf");
     let _ = run("pfctl", &["-a", "dpl", "-F", "all"]);
+    if had_anchor { " The old pf redirect was removed." } else { "" }.to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn remove_portmap() -> Result<String, String> {
+    remove_socketd()?;
+    remove_portmap_files();
     Ok("Port redirect removed.".into())
+}
+
+/// Escape the five XML metacharacters so a path can't close a tag and inject keys.
+#[cfg(target_os = "macos")]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// macOS gets :80/:443 from launchd, not from a redirect. Kept so an older `dpl`
+/// invoking this helper fails loudly instead of silently doing nothing.
+#[cfg(target_os = "macos")]
+fn install_portmap(_http: &str, _https: &str) -> Result<String, String> {
+    Err("this dpl binds :80/:443 via launchd; run `sudo dpl setup` instead".into())
+}
+
+#[cfg(target_os = "linux")]
+fn install_socketd(_user: &str, _home: &str, _dpld: &str) -> Result<String, String> {
+    Err("socket activation is macOS-only; use install-portmap".into())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_socketd() -> Result<String, String> {
+    Ok("Nothing to remove.".into())
 }
 
 #[cfg(target_os = "linux")]

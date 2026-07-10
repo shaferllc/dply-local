@@ -86,7 +86,9 @@ fn run() -> Result<()> {
         Command::Parity { site, remote } => {
             commands::parity::run(home.as_deref(), args.host.as_deref(), site, remote, args.json)
         }
-        Command::Setup { no_ports } => commands::local::setup(home.as_deref(), !no_ports),
+        Command::Setup { no_ports, as_user } => {
+            commands::local::setup(home.as_deref(), !no_ports, as_user.as_deref())
+        }
         Command::Runtime { site, runtime } => commands::local::set_runtime(home.as_deref(), site, runtime),
         Command::Octane { site, server } => commands::local::octane_setup(home.as_deref(), &site, &server),
         Command::Xdebug { command } => match command {

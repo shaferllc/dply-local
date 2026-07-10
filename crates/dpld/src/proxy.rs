@@ -26,9 +26,17 @@ use crate::registry::{Registry, SiteRoute};
 
 type ProxyBody = BoxBody<Bytes, Box<dyn StdError + Send + Sync>>;
 
-/// Bind the HTTP server, preferring port 80 and falling back to 8080 when a
-/// privileged bind isn't allowed (rootless, pre-helper).
+/// Bind the HTTP server.
+///
+/// launchd first: when `dpl setup` has installed the LaunchDaemon, :80 arrives
+/// as an already-bound descriptor and no privileged bind is attempted at all.
+/// Otherwise fall back to binding ourselves — port 80 if we somehow may, else
+/// 8080 (rootless, pre-setup).
 pub async fn bind_preferred() -> Result<(TcpListener, u16)> {
+    if let Some((listener, port)) = crate::launchd::activated_listener("http") {
+        tracing::debug!(port, "adopted the http socket from launchd");
+        return Ok((listener, port));
+    }
     for port in [preferred_port(), 8080] {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         match TcpListener::bind(addr).await {
