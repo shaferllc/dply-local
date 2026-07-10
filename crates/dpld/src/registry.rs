@@ -38,6 +38,9 @@ struct RouteInfo {
     xdebug: Mode,
     /// Whether this site's master has the SPX profiler loaded.
     profile: bool,
+    /// This site's opcache preload script (absolute), if any. A preloaded site
+    /// belongs to its own master, so this is part of the master identity too.
+    preload: Option<PathBuf>,
     secure: bool,
     upstream: Option<u16>,
 }
@@ -118,7 +121,7 @@ impl Registry {
         let route = self.routes.get(site_name)?;
         // Octane sites are served by proxying to their upstream port; a dummy
         // fpm_addr is fine since the proxy checks `upstream` first.
-        let fpm_addr = match self.fpm.addr_for(&route.php_bin, &route.xdebug, route.profile) {
+        let fpm_addr = match self.fpm.addr_for(&route.php_bin, &route.xdebug, route.profile, route.preload.as_deref()) {
             Some(a) => a,
             None if route.upstream.is_some() => SocketAddr::from(([127, 0, 0, 1], 0)),
             None => return None,
@@ -143,7 +146,7 @@ impl Registry {
                     .routes
                     .get(&s.name)
                     .map(|r| {
-                        r.upstream.is_some() || self.fpm.addr_for(&r.php_bin, &r.xdebug, r.profile).is_some()
+                        r.upstream.is_some() || self.fpm.addr_for(&r.php_bin, &r.xdebug, r.profile, r.preload.as_deref()).is_some()
                     })
                     .unwrap_or(false);
                 // Reuse the cached route's binary rather than re-resolving PHP.
@@ -240,8 +243,8 @@ impl Registry {
         let mut needed: BTreeSet<MasterKey> = BTreeSet::new();
         let site_bins: Vec<PathBuf> = resolved.iter().map(&bin_for).collect();
         for (site, bin) in resolved.iter().zip(&site_bins) {
-            if self.fpm.ensure(bin, &site.xdebug, site.profile).is_ok() {
-                needed.insert((bin.clone(), site.xdebug.clone(), site.profile));
+            if self.fpm.ensure(bin, &site.xdebug, site.profile, site.preload.as_deref()).is_ok() {
+                needed.insert((bin.clone(), site.xdebug.clone(), site.profile, site.preload.clone()));
             }
         }
         self.fpm.retain(&needed);
@@ -278,6 +281,7 @@ impl Registry {
                     php_bin: bin,
                     xdebug: site.xdebug.clone(),
                     profile: site.profile,
+                    preload: site.preload.clone(),
                     secure: site.secure,
                     upstream: upstreams.get(&site.name).copied(),
                 },
@@ -292,7 +296,7 @@ impl Registry {
 
         self.routes
             .values()
-            .filter(|r| self.fpm.addr_for(&r.php_bin, &r.xdebug, r.profile).is_some())
+            .filter(|r| self.fpm.addr_for(&r.php_bin, &r.xdebug, r.profile, r.preload.as_deref()).is_some())
             .count()
     }
 
@@ -360,6 +364,7 @@ impl Registry {
                 runtime: None,
                 xdebug: None,
                 profile: false,
+                preload: None,
             },
         );
         self.save()?;
@@ -395,7 +400,7 @@ impl Registry {
             let Ok(path) = canonicalize(path) else { continue };
             self.config.links.insert(
                 name.to_lowercase(),
-                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None, profile: false },
+                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None, profile: false, preload: None },
             );
             linked_ok += 1;
         }

@@ -26,10 +26,12 @@ use tokio::process::{Child, Command};
 
 /// Identifies one php-fpm master: a PHP binary plus the Xdebug mode it starts
 /// with. Ordered so it can key a `BTreeMap`.
-/// Identifies a php-fpm master: its PHP binary, Xdebug mode, and whether the SPX
-/// profiler is loaded. The profiler is a third axis because a profiled site needs
-/// SPX in its pool and a plain site must not pay for it.
-pub type MasterKey = (PathBuf, Mode, bool);
+/// Identifies a php-fpm master: its PHP binary, Xdebug mode, whether the SPX
+/// profiler is loaded, and an optional opcache preload script. The last three are
+/// separate axes because each forks a dedicated master: a profiled site needs SPX
+/// in its pool, and a preloaded site needs its own `opcache.preload` — neither of
+/// which a plain shared site must pay for. `None` preload = the shared master.
+pub type MasterKey = (PathBuf, Mode, bool, Option<PathBuf>);
 
 struct Master {
     port: u16,
@@ -72,18 +74,31 @@ impl FpmManager {
         }
     }
 
-    /// The FastCGI address for a PHP binary at a given Xdebug mode, if its
-    /// master is running.
-    pub fn addr_for(&self, php_bin: &Path, mode: &Mode, profile: bool) -> Option<SocketAddr> {
+    /// The FastCGI address for a PHP binary at a given Xdebug mode (and preload
+    /// script, if any), if its master is running.
+    pub fn addr_for(
+        &self,
+        php_bin: &Path,
+        mode: &Mode,
+        profile: bool,
+        preload: Option<&Path>,
+    ) -> Option<SocketAddr> {
         self.masters
-            .get(&(php_bin.to_path_buf(), mode.clone(), profile))
+            .get(&(php_bin.to_path_buf(), mode.clone(), profile, preload.map(Path::to_path_buf)))
             .map(|m| SocketAddr::from(([127, 0, 0, 1], m.port)))
     }
 
     /// Ensure a php-fpm master is running for `php_bin` at `mode` (with SPX loaded
-    /// when `profile`), returning its port.
-    pub fn ensure(&mut self, php_bin: &Path, mode: &Mode, profile: bool) -> Result<u16> {
-        let key: MasterKey = (php_bin.to_path_buf(), mode.clone(), profile);
+    /// when `profile`, and `opcache.preload` set when `preload` is given),
+    /// returning its port.
+    pub fn ensure(
+        &mut self,
+        php_bin: &Path,
+        mode: &Mode,
+        profile: bool,
+        preload: Option<&Path>,
+    ) -> Result<u16> {
+        let key: MasterKey = (php_bin.to_path_buf(), mode.clone(), profile, preload.map(Path::to_path_buf));
         if let Some(m) = self.masters.get_mut(&key) {
             // Reap if it died; otherwise reuse.
             if matches!(m.child.try_wait(), Ok(Some(_))) {
@@ -96,8 +111,8 @@ impl FpmManager {
         let fpm_bin = derive_fpm(php_bin)
             .with_context(|| format!("no php-fpm found next to {}", php_bin.display()))?;
         let port = free_port()?;
-        let conf = write_conf(php_bin, mode, profile, port)?;
-        let log = log_file(php_bin, mode, profile)?;
+        let conf = write_conf(php_bin, mode, profile, preload, port)?;
+        let log = log_file(php_bin, mode, profile, preload)?;
 
         let mut cmd = Command::new(&fpm_bin);
         cmd.arg("--nodaemonize").arg("--fpm-config").arg(&conf);
@@ -150,7 +165,7 @@ impl FpmManager {
         self.masters.insert(key, Master { port, child });
         // Prime the first worker in the background so a real request doesn't wait
         // on the fork + PHP startup this master just triggered.
-        warm(port, master_dir(php_bin, mode, profile)?);
+        warm(port, master_dir(php_bin, mode, profile, preload)?);
         Ok(port)
     }
 
@@ -214,10 +229,30 @@ fn derive_fpm(php_bin: &Path) -> Option<PathBuf> {
 }
 
 /// The directory holding one master's generated config and logs. Masters differ
-/// by Xdebug mode and whether SPX is loaded, so both are part of the path.
-fn master_dir(php_bin: &Path, mode: &Mode, profile: bool) -> Result<PathBuf> {
-    let slug = if profile { format!("{}-spx", mode.slug()) } else { mode.slug() };
+/// by Xdebug mode, whether SPX is loaded, and their preload script, so all three
+/// are part of the path. Preloaded sites each get their own master, so the
+/// script's absolute path is hashed into the slug to keep two preloaded sites on
+/// the same PHP+mode from colliding on one directory.
+fn master_dir(php_bin: &Path, mode: &Mode, profile: bool, preload: Option<&Path>) -> Result<PathBuf> {
+    let mut slug = mode.slug();
+    if profile {
+        slug = format!("{slug}-spx");
+    }
+    if let Some(script) = preload {
+        slug = format!("{slug}-preload-{:016x}", path_hash(script));
+    }
     Ok(dpl_core::paths::php_dir(None, php_bin)?.join(format!("fpm-{slug}")))
+}
+
+/// A stable (within and across runs) 64-bit FNV-1a hash of a path's bytes, used
+/// only to give each preload master a unique, collision-free directory slug.
+fn path_hash(path: &Path) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// `PHP_INI_SCAN_DIR` covering `dirs`, with a leading empty entry so PHP still
@@ -240,11 +275,33 @@ fn scan_dir_env(dirs: &[PathBuf]) -> String {
 /// worker recompiles the app into opcache (the slow part), so letting a warm
 /// worker survive normal dev pauses — a rebuild, a coffee — keeps opcache primed
 /// and subsequent requests fast, at the cost of one lingering worker per master.
-fn write_conf(php_bin: &Path, mode: &Mode, profile: bool, port: u16) -> Result<PathBuf> {
-    let dir = master_dir(php_bin, mode, profile)?;
+///
+/// When `preload` is set, the pool gets `opcache.preload` pointed at that script
+/// (with headroom for the compiled code), so php-fpm runs it once at master start
+/// and holds the compiled classes in shared memory for every worker — turning the
+/// first real request warm. Only preload masters carry it; the shared master does
+/// not, so ordinary sites pay nothing.
+fn write_conf(
+    php_bin: &Path,
+    mode: &Mode,
+    profile: bool,
+    preload: Option<&Path>,
+    port: u16,
+) -> Result<PathBuf> {
+    let dir = master_dir(php_bin, mode, profile, preload)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let log = dir.join("fpm.log");
     let conf = dir.join("php-fpm.conf");
+    // Preloaded pools need a bigger opcache segment (the whole preload script is
+    // resident) and the directive itself.
+    let preload_conf = match preload {
+        Some(script) => format!(
+            "php_admin_value[opcache.memory_consumption] = 256\n\
+             php_admin_value[opcache.preload] = {}\n",
+            script.display(),
+        ),
+        None => String::new(),
+    };
     let body = format!(
         "[global]\n\
          error_log = {log}\n\
@@ -259,7 +316,8 @@ fn write_conf(php_bin: &Path, mode: &Mode, profile: bool, port: u16) -> Result<P
          pm.max_requests = 2000\n\
          request_terminate_timeout = 90s\n\
          catch_workers_output = yes\n\
-         clear_env = no\n",
+         clear_env = no\n\
+         {preload_conf}",
         log = log.display(),
     );
     std::fs::write(&conf, body).with_context(|| format!("writing {}", conf.display()))?;
@@ -297,8 +355,8 @@ fn warm(port: u16, dir: PathBuf) {
     });
 }
 
-fn log_file(php_bin: &Path, mode: &Mode, profile: bool) -> Result<std::fs::File> {
-    let dir = master_dir(php_bin, mode, profile)?;
+fn log_file(php_bin: &Path, mode: &Mode, profile: bool, preload: Option<&Path>) -> Result<std::fs::File> {
+    let dir = master_dir(php_bin, mode, profile, preload)?;
     std::fs::create_dir_all(&dir).ok();
     std::fs::File::create(dir.join("master.log")).context("opening fpm master log")
 }
@@ -324,8 +382,8 @@ mod tests {
     #[test]
     fn masters_for_different_modes_get_different_dirs() {
         let php = Path::new("/opt/homebrew/opt/php@8.3/bin/php");
-        let off = master_dir(php, &Mode::off(), false).unwrap();
-        let dbg = master_dir(php, &Mode::parse("debug").unwrap(), false).unwrap();
+        let off = master_dir(php, &Mode::off(), false, None).unwrap();
+        let dbg = master_dir(php, &Mode::parse("debug").unwrap(), false, None).unwrap();
         assert_ne!(off, dbg);
         assert!(off.ends_with("fpm-off"));
         assert!(dbg.ends_with("fpm-debug"));
@@ -339,18 +397,33 @@ mod tests {
     #[test]
     fn profiler_masters_are_distinct_from_plain_ones() {
         let php = Path::new("/opt/homebrew/opt/php@8.3/bin/php");
-        let plain = master_dir(php, &Mode::off(), false).unwrap();
-        let profiled = master_dir(php, &Mode::off(), true).unwrap();
+        let plain = master_dir(php, &Mode::off(), false, None).unwrap();
+        let profiled = master_dir(php, &Mode::off(), true, None).unwrap();
         assert_ne!(plain, profiled);
         assert!(plain.ends_with("fpm-off"));
         assert!(profiled.ends_with("fpm-off-spx"));
     }
 
+    /// A preloaded site gets its own master directory, distinct from the shared
+    /// one at the same mode, and two different preload scripts never collide.
+    #[test]
+    fn preload_masters_are_distinct_and_per_script() {
+        let php = Path::new("/opt/homebrew/opt/php@8.3/bin/php");
+        let shared = master_dir(php, &Mode::off(), false, None).unwrap();
+        let a = master_dir(php, &Mode::off(), false, Some(Path::new("/a/preload.php"))).unwrap();
+        let b = master_dir(php, &Mode::off(), false, Some(Path::new("/b/preload.php"))).unwrap();
+        assert_ne!(shared, a);
+        assert_ne!(a, b, "different preload scripts must not share a master dir");
+        assert!(a.file_name().unwrap().to_str().unwrap().starts_with("fpm-off-preload-"));
+        // Stable: the same script resolves to the same dir across calls.
+        assert_eq!(a, master_dir(php, &Mode::off(), false, Some(Path::new("/a/preload.php"))).unwrap());
+    }
+
     #[test]
     fn equivalent_mode_spellings_share_one_master_dir() {
         let php = Path::new("/opt/homebrew/opt/php@8.3/bin/php");
-        let a = master_dir(php, &Mode::parse("debug,develop").unwrap(), false).unwrap();
-        let b = master_dir(php, &Mode::parse("develop,debug").unwrap(), false).unwrap();
+        let a = master_dir(php, &Mode::parse("debug,develop").unwrap(), false, None).unwrap();
+        let b = master_dir(php, &Mode::parse("develop,debug").unwrap(), false, None).unwrap();
         assert_eq!(a, b);
     }
 

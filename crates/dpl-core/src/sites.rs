@@ -104,6 +104,10 @@ pub struct ResolvedSite {
     pub xdebug: crate::xdebug::Mode,
     /// Whether the SPX profiler is on for this site.
     pub profile: bool,
+    /// Absolute path to this site's opcache preload script, if configured. A
+    /// preloaded site gets its own php-fpm master. Resolved from `Link.preload`
+    /// against the project root; parked sites are always `None`.
+    pub preload: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +185,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
             runtime: link.runtime.clone(),
             xdebug: mode_of(link.xdebug.as_ref()),
             profile: link.profile,
+            preload: link.preload.as_ref().map(|p| link.path.join(p)),
         });
     }
 
@@ -209,6 +214,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
                 runtime: None,
                 xdebug: mode_of(None),
                 profile: false,
+                preload: None,
             });
         }
     }

@@ -150,6 +150,13 @@ pub struct Link {
     /// request. See `dpl profile`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub profile: bool,
+    /// Opcache preload script for this site, relative to the project root. When
+    /// set, the site gets its own php-fpm master with `opcache.preload` pointed
+    /// at it, so the script's (typically vendor) code is compiled into shared
+    /// memory once at master start — eliminating the first-request compile.
+    /// None = share the common master. See `dpl preload`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preload: Option<PathBuf>,
 }
 
 impl LocalConfig {
