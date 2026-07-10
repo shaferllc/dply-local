@@ -109,6 +109,130 @@ struct LocalDetailView: View {
         }
     }
 
+    // MARK: Profiler
+
+    @State private var profileBusy = false
+    private var isProfiling: Bool { site.dig("profile") == .bool(true) }
+    private var profileInstalled: Bool { site.dig("profile_installed") == .bool(true) }
+
+    /// Per-site SPX profiler: one toggle, plus a link to the same-origin flame
+    /// graphs. Turning it on installs SPX for this PHP if needed.
+    @ViewBuilder
+    private var profilerSection: some View {
+        DetailSection(title: "Profiler") {
+            VStack(alignment: .leading, spacing: 10) {
+                if !isLinked {
+                    Text("Link this site to profile it on a pool of its own.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 10) {
+                    Toggle(isOn: Binding(
+                        get: { isProfiling },
+                        set: { on in
+                            Task {
+                                profileBusy = true
+                                await store.setProfile(name: name, on: on)
+                                profileBusy = false
+                            }
+                        })) {
+                        Text(isProfiling ? "On — every request is captured" : "Off")
+                    }
+                    .toggleStyle(.switch).tint(Theme.violet)
+                    .disabled(profileBusy || !isLinked)
+                    if profileBusy { ProgressView().controlSize(.small) }
+                    Spacer()
+                    if isProfiling {
+                        Button {
+                            if let u = URL(string: "\(url.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/?SPX_UI_URI=/&SPX_KEY=dpl-local") {
+                                NSWorkspace.shared.open(u)
+                            }
+                        } label: { Label("Flame graphs", systemImage: "flame") }
+                    }
+                }
+                Text(isProfiling
+                    ? "SPX auto-profiles every request into a flame graph at this site's own origin."
+                    : "Off — this site runs on the shared pool with no SPX, at full speed.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !profileInstalled {
+                    Text("SPX will be installed for PHP \(effectivePhp.isEmpty ? "this version" : effectivePhp) when you turn it on.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // MARK: Node
+
+    @State private var nodeBusy = false
+    @State private var editingNode = false
+    @State private var nodeDraft = ""
+    private var nodeVersion: String? { site.first(["node"]) }
+    private var nodeSource: String? { site.first(["node_source"]) }
+    private let nodePicks = ["22", "20", "18"]
+
+    /// Per-site Node version — writes the repo's `.nvmrc`; fnm/nvm switch on `cd`.
+    @ViewBuilder
+    private var nodeSection: some View {
+        DetailSection(title: "Node") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    if let v = nodeVersion {
+                        Text("Node \(v)").font(.callout.weight(.medium))
+                        Text("· \(nodeSource ?? ".nvmrc")").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("unpinned").font(.callout).foregroundStyle(.secondary)
+                    }
+                    if nodeBusy { ProgressView().controlSize(.small) }
+                    Spacer()
+                }
+                if editingNode {
+                    HStack(spacing: 6) {
+                        TextField("e.g. 20.11.0", text: $nodeDraft)
+                            .textFieldStyle(.roundedBorder).frame(width: 130)
+                            .onSubmit { Task { await pinNode(nodeDraft) } }
+                        Button("Pin") { Task { await pinNode(nodeDraft) } }
+                            .buttonStyle(.borderedProminent).tint(Theme.violet)
+                            .disabled(nodeDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Button("Cancel") { editingNode = false }.buttonStyle(.bordered)
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        ForEach(nodePicks, id: \.self) { v in
+                            Button(v) { Task { await pinNode(v) } }
+                                .buttonStyle(.bordered)
+                                .tint(nodeVersion == v ? Theme.violet : nil)
+                        }
+                        if nodeVersion == nil || nodeSource == "package.json" {
+                            Button {
+                                Task { nodeBusy = true; await store.detectNodeVersion(name: name); nodeBusy = false }
+                            } label: { Label("Detect", systemImage: "wand.and.stars") }
+                                .buttonStyle(.bordered)
+                                .help("Read the version from this repo's package.json")
+                        }
+                        Button { nodeDraft = nodeVersion ?? ""; editingNode = true } label: {
+                            Image(systemName: "pencil")
+                        }.buttonStyle(.bordered)
+                        Spacer()
+                    }
+                    .disabled(nodeBusy)
+                }
+                Text(store.nodeManager.map { "\($0) switches to this version when you `cd` in." }
+                    ?? "Install fnm or nvm to auto-switch when you `cd` in.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .task { if store.nodeManager == nil { await store.loadNodeManager() } }
+    }
+
+    private func pinNode(_ version: String) async {
+        let v = version.trimmingCharacters(in: .whitespaces)
+        guard !v.isEmpty else { return }
+        editingNode = false
+        nodeBusy = true
+        await store.setNodeVersion(name: name, version: v)
+        nodeBusy = false
+    }
+
     /// Minimal PHP version-constraint check (`^8.3`, `~8.1`, `>=8.1`, `8.2.*`).
     private func phpSatisfies(_ constraint: String, _ version: String) -> Bool {
         func parse(_ s: String) -> (Int, Int)? {
@@ -256,6 +380,8 @@ struct LocalDetailView: View {
 
                 if !isProxy {
                     xdebugSection
+                    profilerSection
+                    nodeSection
                 }
 
                 if !requiresPhp.isEmpty {

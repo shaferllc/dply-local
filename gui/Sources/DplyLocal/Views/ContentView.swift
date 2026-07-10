@@ -78,8 +78,6 @@ struct ContentView: View {
         case .dashboard: DashboardView()
         case .php: PhpPage()
         case .extensions: ExtensionsPage()
-        case .profiler: ProfilerPage()
-        case .node: NodePage()
         case .status: StatusView()
         case .doctor: DoctorPage()
         case .settings: SettingsPage()
@@ -99,8 +97,6 @@ struct ContentView: View {
                 sidebarRow(.dumps)
                 sidebarRow(.php)
                 sidebarRow(.extensions)
-                sidebarRow(.profiler)
-                sidebarRow(.node)
             }
             // Opt-in: the dply platform only appears once it's enabled in Settings.
             if store.dplyEnabled {
@@ -189,7 +185,7 @@ struct ContentView: View {
             MailListView(selection: $selection)
         case .dumps:
             DumpsListView(selection: $selection)
-        case .dashboard, .php, .extensions, .profiler, .node, .status, .doctor, .settings:
+        case .dashboard, .php, .extensions, .status, .doctor, .settings:
             EmptyView() // full-width surfaces — no middle column
         case .edgeSites:
             siteList(
@@ -283,7 +279,7 @@ struct ContentView: View {
             if let id = selection, let n = Int(id), let dump = store.dumps.first(where: { $0.id == n }) {
                 DumpDetailView(dump: dump).id(id)
             } else { placeholder("Select a dump", "ladybug") }
-        case .dashboard, .php, .extensions, .profiler, .node, .status, .doctor, .settings:
+        case .dashboard, .php, .extensions, .status, .doctor, .settings:
             EmptyView() // rendered by `fullWidthPage`
         case .edgeSites:
             if let id = selection { EdgeDetailView(siteID: id).id(id) } else { placeholder("Select an edge site", "bolt.horizontal.circle") }
