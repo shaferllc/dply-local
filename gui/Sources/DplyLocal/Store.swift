@@ -182,6 +182,10 @@ func runProcess(_ exe: String, _ args: [String]) -> String {
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: exe)
     proc.arguments = args
+    // Launched from Finder, we inherit launchd's bare PATH — without this, every
+    // `which` probe below reports Homebrew and Composer missing on a machine that
+    // has them.
+    proc.environment = DplyCLI.toolEnvironment
     let out = Pipe()
     proc.standardOutput = out
     proc.standardError = Pipe()

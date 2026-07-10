@@ -74,9 +74,26 @@ struct DplyCLI {
         ]
     }
 
+    /// The environment to hand every child process.
+    ///
+    /// An app launched from Finder or the Dock inherits launchd's `PATH`
+    /// (`/usr/bin:/bin:/usr/sbin:/sbin`) — not a login shell's. Every `which`-based
+    /// probe downstream then reports Homebrew, Composer and the database engines as
+    /// "not installed" on a machine where they plainly are. The dpld launchd plists
+    /// prepend these same directories for exactly this reason.
+    static var toolEnvironment: [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let brewDirs = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/local/sbin"]
+        let current = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+        let missing = brewDirs.filter { !current.contains($0) && FileManager.default.fileExists(atPath: $0) }
+        env["PATH"] = (missing + current).joined(separator: ":")
+        return env
+    }
+
     private func which(_ name: String) -> String? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.environment = DplyCLI.toolEnvironment
         proc.arguments = ["which", name]
         let pipe = Pipe()
         proc.standardOutput = pipe
@@ -108,6 +125,7 @@ struct DplyCLI {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binary)
         proc.arguments = fullArgs
+        proc.environment = DplyCLI.toolEnvironment
         let out = Pipe()
         let err = Pipe()
         proc.standardOutput = out

@@ -652,9 +652,4 @@ fn output(program: &Path, args: &[&str]) -> Result<String> {
     }
 }
 
-fn which(name: &str) -> Option<PathBuf> {
-    let out = std::process::Command::new("/usr/bin/env").arg("which").arg(name).output().ok()?;
-    if !out.status.success() { return None; }
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!p.is_empty()).then(|| PathBuf::from(p))
-}
+use dpl_core::tools::which;

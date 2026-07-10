@@ -1171,14 +1171,10 @@ fn helper_path() -> Result<std::path::PathBuf> {
     anyhow::bail!("dpl-helper not found next to `dpl` or on your PATH.")
 }
 
-/// `which <name>` → path, or None.
+/// `which <name>` → path, or None. Falls back to the standard prefixes when
+/// `PATH` is launchd's bare one — see `dpl_core::tools`.
 pub(crate) fn which(name: &str) -> Option<String> {
-    let out = std::process::Command::new("/usr/bin/env").arg("which").arg(name).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!p.is_empty()).then_some(p)
+    dpl_core::tools::which(name).map(|p| p.to_string_lossy().into_owned())
 }
 
 fn send_message(home: Option<&str>, request: Request) -> Result<()> {

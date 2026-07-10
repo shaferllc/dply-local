@@ -9,6 +9,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::tools::which;
+
 /// A discovered PHP install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhpVersion {
@@ -244,12 +246,3 @@ pub fn startup_load_errors(bin: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-/// `which <name>` → absolute path.
-fn which(name: &str) -> Option<PathBuf> {
-    let out = Command::new("/usr/bin/env").arg("which").arg(name).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!path.is_empty()).then(|| PathBuf::from(path))
-}

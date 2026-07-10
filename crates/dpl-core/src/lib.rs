@@ -13,6 +13,7 @@ pub mod paths;
 pub mod php;
 pub mod seams;
 pub mod sites;
+pub mod tools;
 pub mod xdebug;
 
 pub use error::{CoreError, Result};
