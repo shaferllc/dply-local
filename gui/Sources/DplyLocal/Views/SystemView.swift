@@ -163,10 +163,6 @@ struct LogTailView: View {
     @State private var lines: [String] = []
     @State private var live = true
 
-    // The pattern needs a real ESC byte, not the text "\u{1B}" — ICU rejects the
-    // brace form. `try?` so a bad pattern degrades to "don't strip", never a crash.
-    private static let ansi = try? NSRegularExpression(pattern: "\u{1B}\\[[0-9;]*m")
-
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -197,35 +193,68 @@ struct LogTailView: View {
                     }
                     .padding(12)
                 }
+                // id: path — cancels and restarts when the subsystem switches, so
+                // the previous log stops polling.
                 .task(id: path) { await follow(proxy) }
             }
         }
     }
 
+    /// Poll the tail of the file off the main thread, and only touch SwiftUI state
+    /// (and scroll) when the content actually changed. Reading + parsing on a
+    /// detached task keeps a large `dpld.out.log` from freezing the UI, which is
+    /// what made switching tabs feel slow.
     private func follow(_ proxy: ScrollViewProxy) async {
+        let path = self.path
+        let filter = self.filter
         while !Task.isCancelled {
             if live {
-                load()
-                proxy.scrollTo("bottom", anchor: .bottom)
+                let next = await Task.detached(priority: .utility) {
+                    LogTail.read(path: path, filter: filter)
+                }.value
+                if next != lines {
+                    lines = next
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
             }
             try? await Task.sleep(for: .seconds(1.5))
         }
     }
+}
 
-    private func load() {
-        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else {
-            lines = []
-            return
+/// The off-main-thread log reader. Reads only the tail of the file, filters and
+/// strips ANSI on just the lines it keeps — never the whole file.
+enum LogTail {
+    private static let ansi = try? NSRegularExpression(pattern: "\u{1B}\\[[0-9;]*m")
+    private static let tailBytes: UInt64 = 256 * 1024
+    private static let keep = 600
+
+    static func read(path: String, filter: String?) -> [String] {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
+        defer { try? handle.close() }
+
+        // Read only the last `tailBytes` — a live tail never needs the whole log.
+        let size = (try? handle.seekToEnd()) ?? 0
+        let start = size > tailBytes ? size - tailBytes : 0
+        try? handle.seek(toOffset: start)
+        let data = (try? handle.readToEnd()) ?? Data()
+        guard var text = String(data: data, encoding: .utf8) else { return [] }
+
+        // If we seeked into the middle of a line, drop that partial first line.
+        if start > 0, let nl = text.firstIndex(of: "\n") {
+            text = String(text[text.index(after: nl)...])
         }
-        var out = raw.split(separator: "\n").map { stripAnsi(String($0)) }
+
+        var rows = text.split(separator: "\n").map(String.init)
         if let f = filter, !f.isEmpty {
-            out = out.filter { $0.range(of: f, options: .caseInsensitive) != nil }
+            rows = rows.filter { $0.range(of: f, options: .caseInsensitive) != nil }
         }
-        lines = Array(out.suffix(500))
+        // Strip ANSI on just the kept lines, not the thousands we discard.
+        return rows.suffix(keep).map(strip)
     }
 
-    private func stripAnsi(_ s: String) -> String {
-        guard let ansi = Self.ansi else { return s }
+    private static func strip(_ s: String) -> String {
+        guard let ansi else { return s }
         let range = NSRange(s.startIndex..., in: s)
         return ansi.stringByReplacingMatches(in: s, range: range, withTemplate: "")
     }
