@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod paths;
 pub mod php;
 pub mod seams;
+pub mod node;
 pub mod sites;
 pub mod spx;
 pub mod tools;

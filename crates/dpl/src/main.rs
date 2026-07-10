@@ -103,6 +103,14 @@ fn run() -> Result<()> {
             }
             Some(cli::ProfileCmd::Open { site }) => commands::profile::open(home.as_deref(), site),
         },
+        Command::Node { command } => match command {
+            None | Some(cli::NodeCmd::Status) => commands::node::status(home.as_deref(), args.json),
+            Some(cli::NodeCmd::Use { version, site }) => {
+                commands::node::use_version(home.as_deref(), version, site)
+            }
+            Some(cli::NodeCmd::Install { version }) => commands::node::install(&version),
+            Some(cli::NodeCmd::Detect { site }) => commands::node::detect(home.as_deref(), site),
+        },
         Command::Xdebug { command } => match command {
             None | Some(cli::XdebugCmd::Status) => {
                 commands::xdebug::status(home.as_deref(), args.json)

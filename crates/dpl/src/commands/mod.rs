@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod dply;
 pub mod local;
 pub mod mail;
+pub mod node;
 pub mod parity;
 pub mod profile;
 pub mod valet;

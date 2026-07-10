@@ -185,6 +185,12 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ProfileCmd>,
     },
+    /// Per-project Node version, via fnm/nvm. `dpl node` shows each site's pinned
+    /// version; `use` writes its `.nvmrc`; `install` installs a version.
+    Node {
+        #[command(subcommand)]
+        command: Option<NodeCmd>,
+    },
     /// Control Xdebug per site: step debugging, profiling, tracing.
     Xdebug {
         #[command(subcommand)]
@@ -372,6 +378,32 @@ pub enum MailCmd {
         /// Only this mailbox (`-` for mail with no username).
         #[arg(long)]
         mailbox: Option<String>,
+    },
+}
+
+/// Per-project Node operations. dpl doesn't run Node — it manages each repo's
+/// `.nvmrc` pin (which fnm/nvm auto-switch on) and installs versions through the
+/// manager. `dpl node` with no subcommand lists each site's pinned version.
+#[derive(Subcommand)]
+pub enum NodeCmd {
+    /// Show each site's pinned Node version and the detected manager (default).
+    Status,
+    /// Pin a Node version for a site by writing its `.nvmrc`.
+    Use {
+        /// Node version, e.g. `20` or `18.19.0`.
+        version: String,
+        /// Linked site name; omit to pin the current directory.
+        site: Option<String>,
+    },
+    /// Install a Node version through the detected manager (fnm/nvm).
+    Install {
+        /// Node version, e.g. `20`.
+        version: String,
+    },
+    /// Read a site's desired version from package.json and write its `.nvmrc`.
+    Detect {
+        /// Linked site name; omit for the current directory.
+        site: Option<String>,
     },
 }
 
