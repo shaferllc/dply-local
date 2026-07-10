@@ -287,6 +287,7 @@ enum Surface: String, CaseIterable, Identifiable {
     case php = "PHP"
     case extensions = "Extensions"
     case status = "Status"
+    case system = "System"
     case doctor = "Doctor"
     case settings = "Settings"
     case edgeSites = "Edge Sites"
@@ -300,7 +301,7 @@ enum Surface: String, CaseIterable, Identifiable {
     var isLocal: Bool {
         switch self {
         case .dashboard, .local, .services, .mail, .dumps, .php, .extensions,
-             .status, .doctor, .settings:
+             .status, .system, .doctor, .settings:
             return true
         default:
             return false
@@ -312,7 +313,7 @@ enum Surface: String, CaseIterable, Identifiable {
     /// the whole window instead of being squeezed into the middle column.
     var isFullWidth: Bool {
         switch self {
-        case .dashboard, .php, .extensions, .status, .doctor, .settings: return true
+        case .dashboard, .php, .extensions, .status, .system, .doctor, .settings: return true
         default: return false
         }
     }
@@ -327,6 +328,7 @@ enum Surface: String, CaseIterable, Identifiable {
         case .php: return "chevron.left.forwardslash.chevron.right"
         case .extensions: return "puzzlepiece.extension"
         case .status: return "waveform.path.ecg"
+        case .system: return "square.stack.3d.up.fill"
         case .doctor: return "stethoscope"
         case .settings: return "gearshape"
         case .edgeSites: return "bolt.horizontal.circle"
@@ -656,7 +658,7 @@ final class Store: ObservableObject {
             await loadMail()
         case .dumps:
             break // dumps arrive via the live stream, not a refresh
-        case .status, .doctor:
+        case .status, .system, .doctor:
             break // both load their own report on appear
         case .settings:
             await loadTlds()

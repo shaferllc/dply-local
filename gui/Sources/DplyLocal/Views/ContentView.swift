@@ -79,6 +79,7 @@ struct ContentView: View {
         case .php: PhpPage()
         case .extensions: ExtensionsPage()
         case .status: StatusView()
+        case .system: SystemView()
         case .doctor: DoctorPage()
         case .settings: SettingsPage()
         default: EmptyView()
@@ -109,6 +110,7 @@ struct ContentView: View {
             }
             Section("System") {
                 sidebarRow(.status)
+                sidebarRow(.system)
                 sidebarRow(.doctor)
                 sidebarRow(.settings)
             }
@@ -185,7 +187,7 @@ struct ContentView: View {
             MailListView(selection: $selection)
         case .dumps:
             DumpsListView(selection: $selection)
-        case .dashboard, .php, .extensions, .status, .doctor, .settings:
+        case .dashboard, .php, .extensions, .status, .system, .doctor, .settings:
             EmptyView() // full-width surfaces — no middle column
         case .edgeSites:
             siteList(
@@ -279,7 +281,7 @@ struct ContentView: View {
             if let id = selection, let n = Int(id), let dump = store.dumps.first(where: { $0.id == n }) {
                 DumpDetailView(dump: dump).id(id)
             } else { placeholder("Select a dump", "ladybug") }
-        case .dashboard, .php, .extensions, .status, .doctor, .settings:
+        case .dashboard, .php, .extensions, .status, .system, .doctor, .settings:
             EmptyView() // rendered by `fullWidthPage`
         case .edgeSites:
             if let id = selection { EdgeDetailView(siteID: id).id(id) } else { placeholder("Select an edge site", "bolt.horizontal.circle") }
