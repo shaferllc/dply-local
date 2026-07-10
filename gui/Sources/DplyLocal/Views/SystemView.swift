@@ -225,25 +225,138 @@ struct LogTailView: View {
         }
     }
 
-    /// Poll the tail of the file off the main thread, and only touch SwiftUI state
-    /// (and scroll) when the content actually changed. Reading + parsing on a
-    /// detached task keeps a large `dpld.out.log` from freezing the UI, which is
-    /// what made switching tabs feel slow.
+    /// Consume the event-driven tail stream. Each element is a full snapshot the
+    /// follower emits only when the file actually changed, so there's no busy
+    /// poll and every update is real — we just assign and follow the tail. The
+    /// stream reads and parses off the main thread; SwiftUI state is only touched
+    /// here, on the main actor.
     private func follow(_ proxy: ScrollViewProxy) async {
-        let path = self.path
-        let filter = self.filter
-        while !Task.isCancelled {
-            if live {
-                let next = await Task.detached(priority: .utility) {
-                    LogTail.read(path: path, filter: filter)
-                }.value
-                if next != lines {
-                    lines = next
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
-            }
-            try? await Task.sleep(for: .seconds(1.5))
+        for await snapshot in LogTailStream(path: path, filter: filter).snapshots() {
+            if Task.isCancelled { break }
+            guard live else { continue }
+            lines = snapshot
+            proxy.scrollTo("bottom", anchor: .bottom)
         }
+    }
+}
+
+/// An event-driven file tail. Reads the file's tail once, then uses a vnode
+/// `DispatchSource` to wake only when the file is written — and reads just the
+/// bytes appended since last time, never the whole tail again. That replaces a
+/// 1.5s busy-poll that re-read and re-parsed 256KB on every tick with work that
+/// happens only when a line is actually logged (near-zero cost on an idle log).
+///
+/// Rotation and truncation are handled: a shrink re-reads the tail from the new
+/// end, and a rename/delete/revoke reopens the path (logs rotate under the same
+/// name). All file work runs on a utility queue; snapshots are delivered through
+/// an `AsyncStream` the view awaits.
+final class LogTailStream: @unchecked Sendable {
+    private let path: String
+    private let filter: String?
+    private let queue = DispatchQueue(label: "io.dply.logtail", qos: .utility)
+
+    private var source: (any DispatchSourceFileSystemObject)?
+    private var evtFd: Int32 = -1
+    private var offset: UInt64 = 0
+    private var lines: [String] = []
+    private var cont: AsyncStream<[String]>.Continuation?
+
+    init(path: String, filter: String?) {
+        self.path = path
+        self.filter = filter
+    }
+
+    /// A stream of full tail snapshots, emitted only when the content changes.
+    func snapshots() -> AsyncStream<[String]> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            queue.async { [weak self] in self?.start(continuation) }
+            continuation.onTermination = { [weak self] _ in
+                self?.queue.async { self?.stop() }
+            }
+        }
+    }
+
+    // MARK: On the utility queue
+
+    private func start(_ continuation: AsyncStream<[String]>.Continuation) {
+        cont = continuation
+        open()
+    }
+
+    /// Open (or reopen) the file: seed with the current tail, remember the end
+    /// offset, and arm a vnode source. If the file isn't there yet — a log not
+    /// created until the first request — retry shortly; that's the only polling
+    /// left, and only while the file is absent.
+    private func open() {
+        lines = LogTail.read(path: path, filter: filter)
+        cont?.yield(lines)
+
+        let fd = Darwin.open(path, O_EVTONLY)
+        guard fd >= 0 else {
+            queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, self.cont != nil else { return }
+                self.open()
+            }
+            return
+        }
+        evtFd = fd
+        offset = (try? FileHandle(forReadingAtPath: path)?.seekToEnd()) ?? 0
+
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .extend, .delete, .rename, .revoke],
+            queue: queue
+        )
+        src.setEventHandler { [weak self] in self?.handle(src.data) }
+        src.setCancelHandler { Darwin.close(fd) }
+        source = src
+        src.resume()
+    }
+
+    private func handle(_ event: DispatchSource.FileSystemEvent) {
+        // Rotated away (renamed/deleted/revoked): drop this source and reopen the
+        // path, which a rotator will have recreated.
+        if !event.isDisjoint(with: [.delete, .rename, .revoke]) {
+            teardownSource()
+            open()
+            return
+        }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+
+        if size < offset {
+            // Truncated in place: re-read the tail from the new end.
+            lines = LogTail.read(path: path, filter: filter)
+            offset = size
+            cont?.yield(lines)
+            return
+        }
+        guard size > offset else { return }
+        try? handle.seek(toOffset: offset)
+        let data = (try? handle.readToEnd()) ?? Data()
+        // Consume only through the last newline; a line still being written stays
+        // unread until its newline lands, so we never split or duplicate it.
+        guard let lastNL = data.lastIndex(of: 0x0A) else { return }
+        let complete = data[...lastNL]
+        offset += UInt64(complete.count)
+        guard let text = String(data: Data(complete), encoding: .utf8) else { return }
+        let added = LogTail.parse(text, filter: filter)
+        guard !added.isEmpty else { return }
+        lines = Array((lines + added).suffix(LogTail.keep))
+        cont?.yield(lines)
+    }
+
+    private func teardownSource() {
+        source?.cancel()
+        source = nil
+        evtFd = -1
+    }
+
+    private func stop() {
+        teardownSource()
+        cont?.finish()
+        cont = nil
     }
 }
 
@@ -252,7 +365,7 @@ struct LogTailView: View {
 enum LogTail {
     private static let ansi = try? NSRegularExpression(pattern: "\u{1B}\\[[0-9;]*m")
     private static let tailBytes: UInt64 = 256 * 1024
-    private static let keep = 600
+    static let keep = 600
 
     static func read(path: String, filter: String?) -> [String] {
         guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
@@ -269,13 +382,18 @@ enum LogTail {
         if start > 0, let nl = text.firstIndex(of: "\n") {
             text = String(text[text.index(after: nl)...])
         }
+        return Array(parse(text, filter: filter).suffix(keep))
+    }
 
+    /// Split a chunk of complete log lines, keep only those matching `filter`,
+    /// and strip ANSI on just the survivors. Shared by the initial tail read and
+    /// the incremental append reads.
+    static func parse(_ text: String, filter: String?) -> [String] {
         var rows = text.split(separator: "\n").map(String.init)
         if let f = filter, !f.isEmpty {
             rows = rows.filter { $0.range(of: f, options: .caseInsensitive) != nil }
         }
-        // Strip ANSI on just the kept lines, not the thousands we discard.
-        return rows.suffix(keep).map(strip)
+        return rows.map(strip)
     }
 
     private static func strip(_ s: String) -> String {
