@@ -1,0 +1,35 @@
+name: Release DMG
+
+# Build the macOS app on every version tag and publish the .dmg to the
+# tag's GitHub Release, so releases/latest/download/DplyLocal.dmg always
+# points at the newest build. Also runnable by hand.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the app bundle
+        run: cd gui && ./make-app.sh
+
+      - name: Package the DMG
+        run: |
+          STAGE="$(mktemp -d)"
+          cp -R "$HOME/Desktop/DplyLocal.app" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Dply Local" -srcfolder "$STAGE" \
+            -ov -format UDZO DplyLocal.dmg
+
+      - name: Publish to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: DplyLocal.dmg
+          fail_on_unmatched_files: true
