@@ -102,6 +102,8 @@ pub struct ResolvedSite {
     /// An unparsable stored value degrades to `off` rather than failing the
     /// whole reconcile over one bad site.
     pub xdebug: crate::xdebug::Mode,
+    /// Whether the SPX profiler is on for this site.
+    pub profile: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +180,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
             tld: tld.clone(),
             runtime: link.runtime.clone(),
             xdebug: mode_of(link.xdebug.as_ref()),
+            profile: link.profile,
         });
     }
 
@@ -205,6 +208,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
                 tld: tld.clone(),
                 runtime: None,
                 xdebug: mode_of(None),
+                profile: false,
             });
         }
     }

@@ -108,3 +108,16 @@ pub fn xdebug_dir(override_home: Option<&str>) -> Result<PathBuf> {
     Ok(dpl_dir(override_home)?.join("xdebug"))
 }
 
+/// `~/.dpl/php/<key>/spx-conf.d` — dpl's SPX-only ini scan dir for a PHP binary.
+///
+/// Separate from `php_conf_dir` (which holds the Xdebug loader) so a profiler
+/// master can load SPX without an Xdebug-only master picking up SPX's directives.
+pub fn spx_conf_dir(override_home: Option<&str>, php_bin: &std::path::Path) -> Result<PathBuf> {
+    Ok(php_dir(override_home, php_bin)?.join("spx-conf.d"))
+}
+
+/// `~/.dpl/php/<key>/spx-reports` — where SPX writes profiles for this PHP line.
+pub fn spx_data_dir(override_home: Option<&str>, php_bin: &std::path::Path) -> Result<PathBuf> {
+    Ok(php_dir(override_home, php_bin)?.join("spx-reports"))
+}
+

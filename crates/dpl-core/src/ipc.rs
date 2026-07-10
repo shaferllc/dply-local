@@ -77,6 +77,9 @@ pub enum Request {
     },
     /// Toggle HTTPS for a site (Phase 4 — accepted now, enforced later).
     Secure { name: String, secure: bool },
+    /// Turn the SPX flame-graph profiler on or off for a site. The site gets (or
+    /// loses) its own php-fpm master with SPX loaded.
+    SetProfile { site: String, on: bool },
     /// Manage reverse proxies. `action` ∈ set|remove (list is via ListSites).
     Proxy { action: String, name: String, target: Option<String> },
     /// Pin a PHP version for a site (or set the default when `site` is None).
@@ -196,6 +199,12 @@ pub struct SiteInfo {
     /// Whether Xdebug is installed for this site's PHP version at all.
     #[serde(default)]
     pub xdebug_installed: bool,
+    /// Whether the SPX profiler is on for this site.
+    #[serde(default)]
+    pub profile: bool,
+    /// Whether SPX is installed for this site's PHP version at all.
+    #[serde(default)]
+    pub profile_installed: bool,
 }
 
 /// One local database/cache service.

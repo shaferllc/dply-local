@@ -286,6 +286,7 @@ enum Surface: String, CaseIterable, Identifiable {
     case dumps = "Dumps"
     case php = "PHP"
     case extensions = "Extensions"
+    case profiler = "Profiler"
     case status = "Status"
     case doctor = "Doctor"
     case settings = "Settings"
@@ -300,7 +301,7 @@ enum Surface: String, CaseIterable, Identifiable {
     var isLocal: Bool {
         switch self {
         case .dashboard, .local, .services, .mail, .dumps, .php, .extensions,
-             .status, .doctor, .settings:
+             .profiler, .status, .doctor, .settings:
             return true
         default:
             return false
@@ -312,7 +313,7 @@ enum Surface: String, CaseIterable, Identifiable {
     /// the whole window instead of being squeezed into the middle column.
     var isFullWidth: Bool {
         switch self {
-        case .dashboard, .php, .extensions, .status, .doctor, .settings: return true
+        case .dashboard, .php, .extensions, .profiler, .status, .doctor, .settings: return true
         default: return false
         }
     }
@@ -326,6 +327,7 @@ enum Surface: String, CaseIterable, Identifiable {
         case .dumps: return "ladybug"
         case .php: return "chevron.left.forwardslash.chevron.right"
         case .extensions: return "puzzlepiece.extension"
+        case .profiler: return "flame"
         case .status: return "waveform.path.ecg"
         case .doctor: return "stethoscope"
         case .settings: return "gearshape"
@@ -665,6 +667,8 @@ final class Store: ObservableObject {
             await loadPhpCatalog()
         case .extensions:
             if let r = await background({ try cli.rows(["php"]) }) { phpVersions = r }
+        case .profiler:
+            if let r = await background({ try cli.rows(["sites"]) }) { localSites = r }
         case .edgeSites:
             if let r = await background({ try cli.rows(["dply", "edge:sites"]) }) { edgeSites = r }
         case .sites:
@@ -836,6 +840,14 @@ final class Store: ObservableObject {
     func setLocalSecure(name: String, secure: Bool) async {
         let cli = self.cli
         _ = await background { try cli.runRaw([secure ? "secure" : "unsecure", name]) }
+        await loadLocal()
+    }
+
+    /// Toggle the SPX profiler for a site. Enabling installs SPX for the site's
+    /// PHP if needed, which can take a Homebrew minute — hence `background`.
+    func setProfile(name: String, on: Bool) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["profile", on ? "on" : "off", name]) }
         await loadLocal()
     }
 

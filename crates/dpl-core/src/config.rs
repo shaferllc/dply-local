@@ -138,6 +138,11 @@ pub struct Link {
     /// mode of its own gets its own php-fpm master.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xdebug: Option<String>,
+    /// Whether the SPX flame-graph profiler is on for this site. A profiled site
+    /// gets its own php-fpm master with SPX loaded and auto-profiling every
+    /// request. See `dpl profile`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub profile: bool,
 }
 
 impl LocalConfig {

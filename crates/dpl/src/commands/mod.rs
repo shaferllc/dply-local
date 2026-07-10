@@ -7,6 +7,7 @@ pub mod dply;
 pub mod local;
 pub mod mail;
 pub mod parity;
+pub mod profile;
 pub mod valet;
 pub mod xdebug;
 

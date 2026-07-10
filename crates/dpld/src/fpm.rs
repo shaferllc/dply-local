@@ -26,7 +26,10 @@ use tokio::process::{Child, Command};
 
 /// Identifies one php-fpm master: a PHP binary plus the Xdebug mode it starts
 /// with. Ordered so it can key a `BTreeMap`.
-pub type MasterKey = (PathBuf, Mode);
+/// Identifies a php-fpm master: its PHP binary, Xdebug mode, and whether the SPX
+/// profiler is loaded. The profiler is a third axis because a profiled site needs
+/// SPX in its pool and a plain site must not pay for it.
+pub type MasterKey = (PathBuf, Mode, bool);
 
 struct Master {
     port: u16,
@@ -75,16 +78,16 @@ impl FpmManager {
 
     /// The FastCGI address for a PHP binary at a given Xdebug mode, if its
     /// master is running.
-    pub fn addr_for(&self, php_bin: &Path, mode: &Mode) -> Option<SocketAddr> {
+    pub fn addr_for(&self, php_bin: &Path, mode: &Mode, profile: bool) -> Option<SocketAddr> {
         self.masters
-            .get(&(php_bin.to_path_buf(), mode.clone()))
+            .get(&(php_bin.to_path_buf(), mode.clone(), profile))
             .map(|m| SocketAddr::from(([127, 0, 0, 1], m.port)))
     }
 
-    /// Ensure a php-fpm master is running for `php_bin` at `mode`, returning its
-    /// port.
-    pub fn ensure(&mut self, php_bin: &Path, mode: &Mode) -> Result<u16> {
-        let key: MasterKey = (php_bin.to_path_buf(), mode.clone());
+    /// Ensure a php-fpm master is running for `php_bin` at `mode` (with SPX loaded
+    /// when `profile`), returning its port.
+    pub fn ensure(&mut self, php_bin: &Path, mode: &Mode, profile: bool) -> Result<u16> {
+        let key: MasterKey = (php_bin.to_path_buf(), mode.clone(), profile);
         if let Some(m) = self.masters.get_mut(&key) {
             // Reap if it died; otherwise reuse.
             if matches!(m.child.try_wait(), Ok(Some(_))) {
@@ -97,8 +100,8 @@ impl FpmManager {
         let fpm_bin = derive_fpm(php_bin)
             .with_context(|| format!("no php-fpm found next to {}", php_bin.display()))?;
         let port = free_port()?;
-        let conf = write_conf(php_bin, mode, port)?;
-        let log = log_file(php_bin, mode)?;
+        let conf = write_conf(php_bin, mode, profile, port)?;
+        let log = log_file(php_bin, mode, profile)?;
 
         let mut cmd = Command::new(&fpm_bin);
         cmd.arg("--nodaemonize").arg("--fpm-config").arg(&conf);
@@ -110,24 +113,34 @@ impl FpmManager {
         // value, so it can't live in `master_env`.
         cmd.env_remove("XDEBUG_CONFIG");
 
-        // Only *load* Xdebug into masters that want it. `PHP_INI_SCAN_DIR` points
-        // at dpl's own conf.d, prefixed with `:` so PHP still reads the system
-        // one. Sites with Xdebug off never load the extension at all.
+        // Load Xdebug and/or SPX only into the masters that want them, each via its
+        // own dpl scan dir added to PHP_INI_SCAN_DIR (leading `:` keeps the system
+        // conf.d). A plain master loads neither.
+        let mut scan_dirs: Vec<PathBuf> = Vec::new();
         if !mode.is_off() {
             match xdebug::write_loader(None, php_bin, &self.xdebug_settings) {
-                Ok(Some(dir)) => {
-                    cmd.env("PHP_INI_SCAN_DIR", xdebug::scan_dir_env(&dir));
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        php = %php_bin.display(),
-                        %mode,
-                        "Xdebug requested but not installed for this PHP; \
-                         serving without it (try `dpl php ext-install <version> xdebug`)"
-                    );
-                }
+                Ok(Some(dir)) => scan_dirs.push(dir),
+                Ok(None) => tracing::warn!(
+                    php = %php_bin.display(), %mode,
+                    "Xdebug requested but not installed for this PHP; serving without it \
+                     (try `dpl php ext-install <version> xdebug`)"
+                ),
                 Err(e) => tracing::warn!(error = %e, "writing the Xdebug loader ini failed"),
             }
+        }
+        if profile {
+            match dpl_core::spx::write_loader(None, php_bin) {
+                Ok(Some(dir)) => scan_dirs.push(dir),
+                Ok(None) => tracing::warn!(
+                    php = %php_bin.display(),
+                    "profiler requested but SPX isn't installed for this PHP; serving without it \
+                     (try `dpl php ext-install <version> spx`)"
+                ),
+                Err(e) => tracing::warn!(error = %e, "writing the SPX loader ini failed"),
+            }
+        }
+        if !scan_dirs.is_empty() {
+            cmd.env("PHP_INI_SCAN_DIR", scan_dir_env(&scan_dirs));
         }
 
         let child = cmd
@@ -202,16 +215,30 @@ fn derive_fpm(php_bin: &Path) -> Option<PathBuf> {
 }
 
 /// The directory holding one master's generated config and logs. Masters differ
-/// only by Xdebug mode, so the mode is part of the path.
-fn master_dir(php_bin: &Path, mode: &Mode) -> Result<PathBuf> {
-    Ok(dpl_core::paths::php_dir(None, php_bin)?.join(format!("fpm-{}", mode.slug())))
+/// by Xdebug mode and whether SPX is loaded, so both are part of the path.
+fn master_dir(php_bin: &Path, mode: &Mode, profile: bool) -> Result<PathBuf> {
+    let slug = if profile { format!("{}-spx", mode.slug()) } else { mode.slug() };
+    Ok(dpl_core::paths::php_dir(None, php_bin)?.join(format!("fpm-{slug}")))
+}
+
+/// `PHP_INI_SCAN_DIR` covering `dirs`, with a leading empty entry so PHP still
+/// reads its compiled-in system conf.d first — then each dpl dir in order. An
+/// empty `dirs` should never reach here (the caller guards), but yields `:`,
+/// which is just "the system dir", harmlessly.
+fn scan_dir_env(dirs: &[PathBuf]) -> String {
+    let mut out = String::new();
+    for dir in dirs {
+        out.push(':');
+        out.push_str(&dir.to_string_lossy());
+    }
+    out
 }
 
 /// Write (or overwrite) a minimal php-fpm config for this master and return its
 /// path. `ondemand` keeps idle footprint near zero — which is what makes a
-/// second, Xdebug-enabled master cheap to leave running.
-fn write_conf(php_bin: &Path, mode: &Mode, port: u16) -> Result<PathBuf> {
-    let dir = master_dir(php_bin, mode)?;
+/// second, Xdebug- or SPX-enabled master cheap to leave running.
+fn write_conf(php_bin: &Path, mode: &Mode, profile: bool, port: u16) -> Result<PathBuf> {
+    let dir = master_dir(php_bin, mode, profile)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let log = dir.join("fpm.log");
     let conf = dir.join("php-fpm.conf");
@@ -236,8 +263,8 @@ fn write_conf(php_bin: &Path, mode: &Mode, port: u16) -> Result<PathBuf> {
     Ok(conf)
 }
 
-fn log_file(php_bin: &Path, mode: &Mode) -> Result<std::fs::File> {
-    let dir = master_dir(php_bin, mode)?;
+fn log_file(php_bin: &Path, mode: &Mode, profile: bool) -> Result<std::fs::File> {
+    let dir = master_dir(php_bin, mode, profile)?;
     std::fs::create_dir_all(&dir).ok();
     std::fs::File::create(dir.join("master.log")).context("opening fpm master log")
 }
@@ -263,8 +290,8 @@ mod tests {
     #[test]
     fn masters_for_different_modes_get_different_dirs() {
         let php = Path::new("/opt/homebrew/opt/php@8.3/bin/php");
-        let off = master_dir(php, &Mode::off()).unwrap();
-        let dbg = master_dir(php, &Mode::parse("debug").unwrap()).unwrap();
+        let off = master_dir(php, &Mode::off(), false).unwrap();
+        let dbg = master_dir(php, &Mode::parse("debug").unwrap(), false).unwrap();
         assert_ne!(off, dbg);
         assert!(off.ends_with("fpm-off"));
         assert!(dbg.ends_with("fpm-debug"));
@@ -273,11 +300,23 @@ mod tests {
         assert_eq!(off.parent(), dbg.parent());
     }
 
+    /// A profiled site gets a distinct master from the plain one at the same mode,
+    /// so a plain request never loads SPX.
+    #[test]
+    fn profiler_masters_are_distinct_from_plain_ones() {
+        let php = Path::new("/opt/homebrew/opt/php@8.3/bin/php");
+        let plain = master_dir(php, &Mode::off(), false).unwrap();
+        let profiled = master_dir(php, &Mode::off(), true).unwrap();
+        assert_ne!(plain, profiled);
+        assert!(plain.ends_with("fpm-off"));
+        assert!(profiled.ends_with("fpm-off-spx"));
+    }
+
     #[test]
     fn equivalent_mode_spellings_share_one_master_dir() {
         let php = Path::new("/opt/homebrew/opt/php@8.3/bin/php");
-        let a = master_dir(php, &Mode::parse("debug,develop").unwrap()).unwrap();
-        let b = master_dir(php, &Mode::parse("develop,debug").unwrap()).unwrap();
+        let a = master_dir(php, &Mode::parse("debug,develop").unwrap(), false).unwrap();
+        let b = master_dir(php, &Mode::parse("develop,debug").unwrap(), false).unwrap();
         assert_eq!(a, b);
     }
 

@@ -91,6 +91,18 @@ fn run() -> Result<()> {
         }
         Command::Runtime { site, runtime } => commands::local::set_runtime(home.as_deref(), site, runtime),
         Command::Octane { site, server } => commands::local::octane_setup(home.as_deref(), &site, &server),
+        Command::Profile { command } => match command {
+            None | Some(cli::ProfileCmd::Status) => {
+                commands::profile::status(home.as_deref(), args.json)
+            }
+            Some(cli::ProfileCmd::On { site }) => {
+                commands::profile::set(home.as_deref(), site, true)
+            }
+            Some(cli::ProfileCmd::Off { site }) => {
+                commands::profile::set(home.as_deref(), site, false)
+            }
+            Some(cli::ProfileCmd::Open { site }) => commands::profile::open(home.as_deref(), site),
+        },
         Command::Xdebug { command } => match command {
             None | Some(cli::XdebugCmd::Status) => {
                 commands::xdebug::status(home.as_deref(), args.json)

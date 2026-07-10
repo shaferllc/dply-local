@@ -179,6 +179,12 @@ pub enum Command {
         #[arg(long, default_value = "frankenphp")]
         server: String,
     },
+    /// SPX flame-graph profiler per site. `dpl profile` with no subcommand shows
+    /// each site's status; `on`/`off` toggle it; `open` launches the flame graphs.
+    Profile {
+        #[command(subcommand)]
+        command: Option<ProfileCmd>,
+    },
     /// Control Xdebug per site: step debugging, profiling, tracing.
     Xdebug {
         #[command(subcommand)]
@@ -366,6 +372,30 @@ pub enum MailCmd {
         /// Only this mailbox (`-` for mail with no username).
         #[arg(long)]
         mailbox: Option<String>,
+    },
+}
+
+/// SPX profiler operations. `dpl profile` with no subcommand lists each site's
+/// status. Turning it on gives that site its own php-fpm master with SPX loaded,
+/// auto-profiling every request into a same-origin flame-graph UI.
+#[derive(Subcommand)]
+pub enum ProfileCmd {
+    /// Show each site's profiler status (the default with no subcommand).
+    Status,
+    /// Turn the profiler on for a site (installs SPX for its PHP if needed).
+    On {
+        /// Linked site name.
+        site: String,
+    },
+    /// Turn the profiler off for a site.
+    Off {
+        /// Linked site name.
+        site: String,
+    },
+    /// Open the flame-graph UI for a site in your browser.
+    Open {
+        /// Linked site name.
+        site: String,
     },
 }
 

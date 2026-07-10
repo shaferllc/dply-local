@@ -34,8 +34,11 @@ pub struct SiteRoute {
 struct RouteInfo {
     docroot: PathBuf,
     php_bin: PathBuf,
-    /// Which php-fpm master this site belongs to, together with `php_bin`.
+    /// Which php-fpm master this site belongs to, together with `php_bin` and
+    /// `profile`.
     xdebug: Mode,
+    /// Whether this site's master has the SPX profiler loaded.
+    profile: bool,
     secure: bool,
     upstream: Option<u16>,
 }
@@ -52,6 +55,8 @@ pub struct Registry {
     /// so it is resolved once per reconcile and read from here afterwards —
     /// spawning a process per site under the registry lock deadlocks the daemon.
     xdebug_installed: BTreeMap<PathBuf, bool>,
+    /// Whether SPX is installed, per PHP binary. Cached for the same reason.
+    spx_installed: BTreeMap<PathBuf, bool>,
 }
 
 impl Registry {
@@ -67,12 +72,18 @@ impl Registry {
             routes: BTreeMap::new(),
             tlds,
             xdebug_installed: BTreeMap::new(),
+            spx_installed: BTreeMap::new(),
         })
     }
 
     /// Cached answer to "is Xdebug installed for this PHP binary?".
     fn xdebug_installed(&self, php_bin: &std::path::Path) -> bool {
         self.xdebug_installed.get(php_bin).copied().unwrap_or(false)
+    }
+
+    /// Cached answer to "is SPX installed for this PHP binary?".
+    fn spx_installed(&self, php_bin: &std::path::Path) -> bool {
+        self.spx_installed.get(php_bin).copied().unwrap_or(false)
     }
 
     /// The primary TLD (for building canonical URLs).
@@ -108,7 +119,7 @@ impl Registry {
         let route = self.routes.get(site_name)?;
         // Octane sites are served by proxying to their upstream port; a dummy
         // fpm_addr is fine since the proxy checks `upstream` first.
-        let fpm_addr = match self.fpm.addr_for(&route.php_bin, &route.xdebug) {
+        let fpm_addr = match self.fpm.addr_for(&route.php_bin, &route.xdebug, route.profile) {
             Some(a) => a,
             None if route.upstream.is_some() => SocketAddr::from(([127, 0, 0, 1], 0)),
             None => return None,
@@ -134,15 +145,15 @@ impl Registry {
                     .routes
                     .get(&s.name)
                     .map(|r| {
-                        r.upstream.is_some() || self.fpm.addr_for(&r.php_bin, &r.xdebug).is_some()
+                        r.upstream.is_some() || self.fpm.addr_for(&r.php_bin, &r.xdebug, r.profile).is_some()
                     })
                     .unwrap_or(false);
                 // Reuse the cached route's binary rather than re-resolving PHP.
-                let xdebug_installed = self
+                let (xdebug_installed, profile_installed) = self
                     .routes
                     .get(&s.name)
-                    .map(|r| self.xdebug_installed(&r.php_bin))
-                    .unwrap_or(false);
+                    .map(|r| (self.xdebug_installed(&r.php_bin), self.spx_installed(&r.php_bin)))
+                    .unwrap_or((false, false));
                 SiteInfo {
                     host: s.host(),
                     url: s.url(),
@@ -158,6 +169,8 @@ impl Registry {
                     requires_php: sites::detect_required_php(&s.path),
                     xdebug: Some(s.xdebug.to_string()),
                     xdebug_installed,
+                    profile: s.profile,
+                    profile_installed,
                 }
             })
             .collect();
@@ -178,9 +191,11 @@ impl Registry {
                 runtime: None,
                 framework: None,
                 requires_php: None,
-                // A reverse proxy runs no PHP of ours, so Xdebug is meaningless.
+                // A reverse proxy runs no PHP of ours, so Xdebug/SPX are meaningless.
                 xdebug: None,
                 xdebug_installed: false,
+                profile: false,
+                profile_installed: false,
             });
         }
         infos.sort_by(|a, b| a.name.cmp(&b.name));
@@ -226,24 +241,23 @@ impl Registry {
             self.fpm.retain(&BTreeSet::new());
         }
 
-        // Ensure a master per distinct (PHP binary, Xdebug mode); drop the rest.
-        // Remember each site's binary so we don't resolve it again for the routes.
+        // Ensure a master per distinct (PHP binary, Xdebug mode, profiler); drop the
+        // rest. Remember each site's binary so we don't resolve it again for routes.
         let mut needed: BTreeSet<MasterKey> = BTreeSet::new();
         let site_bins: Vec<PathBuf> = resolved.iter().map(&bin_for).collect();
         for (site, bin) in resolved.iter().zip(&site_bins) {
-            if self.fpm.ensure(bin, &site.xdebug).is_ok() {
-                needed.insert((bin.clone(), site.xdebug.clone()));
+            if self.fpm.ensure(bin, &site.xdebug, site.profile).is_ok() {
+                needed.insert((bin.clone(), site.xdebug.clone(), site.profile));
             }
         }
         self.fpm.retain(&needed);
 
-        // Refresh the Xdebug-installed cache once per distinct binary.
-        self.xdebug_installed = site_bins
-            .iter()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|b| (b.clone(), dpl_core::xdebug::installed(b)))
-            .collect();
+        // Refresh the extension-installed caches once per distinct binary.
+        let distinct_bins: BTreeSet<&PathBuf> = site_bins.iter().collect();
+        self.xdebug_installed =
+            distinct_bins.iter().map(|b| ((*b).clone(), dpl_core::xdebug::installed(b))).collect();
+        self.spx_installed =
+            distinct_bins.iter().map(|b| ((*b).clone(), dpl_core::spx::installed(b))).collect();
 
         // Start/stop Octane servers for sites on a non-fpm runtime, and record
         // each one's upstream port.
@@ -269,6 +283,7 @@ impl Registry {
                     docroot: site.docroot.clone(),
                     php_bin: bin,
                     xdebug: site.xdebug.clone(),
+                    profile: site.profile,
                     secure: site.secure,
                     upstream: upstreams.get(&site.name).copied(),
                 },
@@ -283,7 +298,7 @@ impl Registry {
 
         self.routes
             .values()
-            .filter(|r| self.fpm.addr_for(&r.php_bin, &r.xdebug).is_some())
+            .filter(|r| self.fpm.addr_for(&r.php_bin, &r.xdebug, r.profile).is_some())
             .count()
     }
 
@@ -350,6 +365,7 @@ impl Registry {
                 secure: false,
                 runtime: None,
                 xdebug: None,
+                profile: false,
             },
         );
         self.save()?;
@@ -385,7 +401,7 @@ impl Registry {
             let Ok(path) = canonicalize(path) else { continue };
             self.config.links.insert(
                 name.to_lowercase(),
-                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None },
+                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None, profile: false },
             );
             linked_ok += 1;
         }
@@ -681,6 +697,29 @@ impl Registry {
         self.save()?;
         self.reconcile();
         Ok(format!("Removed .{tld}."))
+    }
+
+    /// Turn the SPX profiler on/off for a site. Only linked sites persist a
+    /// profiler flag; a parked site would forget it on the next reconcile.
+    pub fn set_profile(&mut self, name: &str, on: bool) -> Result<String> {
+        let name = name.to_lowercase();
+        match self.config.links.get_mut(&name) {
+            Some(link) => {
+                link.profile = on;
+                self.save()?;
+                self.reconcile();
+                if on {
+                    Ok(format!(
+                        "Profiler on for {name}.test — every request is now captured. \
+                         Open the flame graphs at http://{name}.test/?SPX_UI_URI=/&SPX_KEY={key}",
+                        key = dpl_core::spx::KEY
+                    ))
+                } else {
+                    Ok(format!("Profiler off for {name}.test."))
+                }
+            }
+            None => Ok(format!("the profiler applies to linked sites only; {name} is not linked.")),
+        }
     }
 
     pub fn set_secure(&mut self, name: &str, secure: bool) -> Result<String> {
