@@ -232,7 +232,11 @@ fn scan_dir_env(dirs: &[PathBuf]) -> String {
 
 /// Write (or overwrite) a minimal php-fpm config for this master and return its
 /// path. `ondemand` keeps idle footprint near zero — which is what makes a
-/// second, Xdebug- or SPX-enabled master cheap to leave running.
+/// second, Xdebug- or SPX-enabled master cheap to leave running. The 5-minute
+/// idle window is a deliberate cold-start trade: the first request to an idle
+/// worker recompiles the app into opcache (the slow part), so letting a warm
+/// worker survive normal dev pauses — a rebuild, a coffee — keeps opcache primed
+/// and subsequent requests fast, at the cost of one lingering worker per master.
 fn write_conf(php_bin: &Path, mode: &Mode, profile: bool, port: u16) -> Result<PathBuf> {
     let dir = master_dir(php_bin, mode, profile)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -248,8 +252,8 @@ fn write_conf(php_bin: &Path, mode: &Mode, profile: bool, port: u16) -> Result<P
          listen.backlog = 256\n\
          pm = ondemand\n\
          pm.max_children = 40\n\
-         pm.process_idle_timeout = 30s\n\
-         pm.max_requests = 500\n\
+         pm.process_idle_timeout = 300s\n\
+         pm.max_requests = 2000\n\
          request_terminate_timeout = 90s\n\
          catch_workers_output = yes\n\
          clear_env = no\n",
