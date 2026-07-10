@@ -148,6 +148,9 @@ impl FpmManager {
 
         tracing::info!(fpm = %fpm_bin.display(), port, %mode, "php-fpm master started");
         self.masters.insert(key, Master { port, child });
+        // Prime the first worker in the background so a real request doesn't wait
+        // on the fork + PHP startup this master just triggered.
+        warm(port, master_dir(php_bin, mode, profile)?);
         Ok(port)
     }
 
@@ -260,7 +263,38 @@ fn write_conf(php_bin: &Path, mode: &Mode, profile: bool, port: u16) -> Result<P
         log = log.display(),
     );
     std::fs::write(&conf, body).with_context(|| format!("writing {}", conf.display()))?;
+    // A side-effect-free target for the post-spawn warm-up hit (see `warm`).
+    std::fs::write(dir.join("warm.php"), "<?php echo 'ok';\n").ok();
     Ok(conf)
+}
+
+/// Fire one throwaway FastCGI request at a freshly-spawned master so php-fpm
+/// forks its first worker and PHP fully initializes — extensions' MINIT, the
+/// shared opcache segment — *before* a real request arrives. It runs a trivial
+/// dpl-owned script, never the user's app, so it has no side effects; the only
+/// thing it buys is moving the one-time fork + interpreter startup off the
+/// first real request's critical path. Fire-and-forget: any error is ignored,
+/// since a failed warm-up just means the first real request pays as it did before.
+fn warm(port: u16, dir: PathBuf) {
+    tokio::spawn(async move {
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let script = dir.join("warm.php");
+        let params = [
+            ("GATEWAY_INTERFACE", "CGI/1.1"),
+            ("REQUEST_METHOD", "GET"),
+            ("SCRIPT_NAME", "/warm.php"),
+            ("REQUEST_URI", "/warm.php"),
+            ("SERVER_PROTOCOL", "HTTP/1.1"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .chain([
+            ("SCRIPT_FILENAME".to_string(), script.to_string_lossy().into_owned()),
+            ("DOCUMENT_ROOT".to_string(), dir.to_string_lossy().into_owned()),
+        ])
+        .collect::<Vec<_>>();
+        let _ = crate::fastcgi::request(addr, &params, &[]).await;
+    });
 }
 
 fn log_file(php_bin: &Path, mode: &Mode, profile: bool) -> Result<std::fs::File> {
