@@ -40,7 +40,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>                 <string>DplyLocal</string>
     <key>CFBundleDisplayName</key>          <string>Dply Local</string>
     <key>CFBundleIdentifier</key>           <string>com.tomshafer.dplylocal</string>
-    <key>CFBundleVersion</key>              <string>2</string>
+    <key>CFBundleVersion</key>              <string>3</string>
     <key>CFBundleShortVersionString</key>   <string>0.2</string>
     <key>CFBundleExecutable</key>           <string>DplyLocal</string>
     <key>CFBundlePackageType</key>          <string>APPL</string>
