@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "dpl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "dpl-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "directories",
@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "dpl-dply"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dpl-core",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "dpl-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dpl-core",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "dpld"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
