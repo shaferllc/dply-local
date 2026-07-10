@@ -155,6 +155,15 @@ async fn serve_site(
     server_port: u16,
     https: bool,
 ) -> Response<ProxyBody> {
+    // A secure site reached over plain http redirects to its https origin, so a
+    // typed URL or an old bookmark lands on the trusted-cert scheme instead of
+    // silently serving cleartext. 307 keeps the method and body intact, and being
+    // temporary it won't stick in the browser cache if the site is later un-secured.
+    if route.secure && !https {
+        let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        return redirect_to(https_target(host, server_port, pq));
+    }
+
     // Octane runtime: the site is served by its own HTTP server on a loopback
     // port — reverse-proxy to it rather than serving over FastCGI.
     if let Some(port) = route.upstream {
@@ -464,6 +473,33 @@ fn content_type(file: &Path) -> &'static str {
     }
 }
 
+/// The https URL to redirect a cleartext request for a secure site to.
+///
+/// `path_and_query` is preserved verbatim (so `?SPX_UI_URI=…` and the like
+/// survive). The port follows the http listener: on the privileged :80 (setup
+/// done) https is :443 and omitted; on the :8080 fallback it's :8443.
+fn https_target(host: &str, http_port: u16, path_and_query: &str) -> String {
+    let authority = if http_port == 80 { host.to_string() } else { format!("{host}:8443") };
+    format!("https://{authority}{path_and_query}")
+}
+
+/// A 307 redirect to `location`, method- and body-preserving.
+fn redirect_to(location: String) -> Response<ProxyBody> {
+    let mut resp = html(
+        StatusCode::TEMPORARY_REDIRECT,
+        format!(
+            "<!doctype html><meta charset=utf-8><title>dpl</title>\
+             <body style=\"font:15px system-ui;max-width:40rem;margin:4rem auto\">\
+             <p>Redirecting to <a href=\"{location}\">{location}</a> …</p>"
+        )
+        .into_bytes(),
+    );
+    if let Ok(value) = HeaderValue::from_str(&location) {
+        resp.headers_mut().insert(hyper::header::LOCATION, value);
+    }
+    resp
+}
+
 fn error_page(status: StatusCode, message: &str) -> Response<ProxyBody> {
     html(
         status,
@@ -570,6 +606,18 @@ mod tests {
     }
 
     /// `/buildings` starts with "/build" but is not inside `/build/`.
+    #[test]
+    fn https_redirect_preserves_path_query_and_picks_the_right_port() {
+        // Setup done: http on 80 → https on 443 (no port).
+        assert_eq!(https_target("dplyi.test", 80, "/"), "https://dplyi.test/");
+        assert_eq!(
+            https_target("dplyi.test", 80, "/dashboard?tab=x&y=1"),
+            "https://dplyi.test/dashboard?tab=x&y=1"
+        );
+        // Fallback: http on 8080 → https on 8443.
+        assert_eq!(https_target("dplyi.test", 8080, "/"), "https://dplyi.test:8443/");
+    }
+
     #[test]
     fn a_prefix_that_merely_starts_with_build_is_not_static_only() {
         assert!(!is_static_only("/buildings/list"));
