@@ -287,6 +287,7 @@ enum Surface: String, CaseIterable, Identifiable {
     case php = "PHP"
     case extensions = "Extensions"
     case profiler = "Profiler"
+    case node = "Node"
     case status = "Status"
     case doctor = "Doctor"
     case settings = "Settings"
@@ -301,7 +302,7 @@ enum Surface: String, CaseIterable, Identifiable {
     var isLocal: Bool {
         switch self {
         case .dashboard, .local, .services, .mail, .dumps, .php, .extensions,
-             .profiler, .status, .doctor, .settings:
+             .profiler, .node, .status, .doctor, .settings:
             return true
         default:
             return false
@@ -313,7 +314,7 @@ enum Surface: String, CaseIterable, Identifiable {
     /// the whole window instead of being squeezed into the middle column.
     var isFullWidth: Bool {
         switch self {
-        case .dashboard, .php, .extensions, .profiler, .status, .doctor, .settings: return true
+        case .dashboard, .php, .extensions, .profiler, .node, .status, .doctor, .settings: return true
         default: return false
         }
     }
@@ -328,6 +329,7 @@ enum Surface: String, CaseIterable, Identifiable {
         case .php: return "chevron.left.forwardslash.chevron.right"
         case .extensions: return "puzzlepiece.extension"
         case .profiler: return "flame"
+        case .node: return "hexagon"
         case .status: return "waveform.path.ecg"
         case .doctor: return "stethoscope"
         case .settings: return "gearshape"
@@ -669,6 +671,9 @@ final class Store: ObservableObject {
             if let r = await background({ try cli.rows(["php"]) }) { phpVersions = r }
         case .profiler:
             if let r = await background({ try cli.rows(["sites"]) }) { localSites = r }
+        case .node:
+            if let r = await background({ try cli.rows(["sites"]) }) { localSites = r }
+            await loadNodeManager()
         case .edgeSites:
             if let r = await background({ try cli.rows(["dply", "edge:sites"]) }) { edgeSites = r }
         case .sites:
@@ -854,6 +859,30 @@ final class Store: ObservableObject {
     func loadLocal() async {
         let cli = self.cli
         if let r = await background({ try cli.rows(["sites"]) }) { localSites = r }
+    }
+
+    /// The Node version manager dpl detected (`fnm`/`nvm`), or nil if none — for
+    /// the Node panel's "who does the switching" hint. Per-site pins ride in
+    /// `localSites`.
+    @Published var nodeManager: String?
+
+    func loadNodeManager() async {
+        let cli = self.cli
+        nodeManager = await backgroundQuiet { try cli.object(["node"]).first(["manager"]) } ?? nil
+    }
+
+    /// Pin a Node version for a site (writes its `.nvmrc`).
+    func setNodeVersion(name: String, version: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["node", "use", version, name]) }
+        await loadLocal()
+    }
+
+    /// Derive a site's Node version from package.json and pin it.
+    func detectNodeVersion(name: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["node", "detect", name]) }
+        await loadLocal()
     }
 
     // MARK: Services / PHP / Mail / TLD actions

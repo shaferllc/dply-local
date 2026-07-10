@@ -205,6 +205,13 @@ pub struct SiteInfo {
     /// Whether SPX is installed for this site's PHP version at all.
     #[serde(default)]
     pub profile_installed: bool,
+    /// Pinned Node version for this site (from `.nvmrc`/`.node-version`/
+    /// `package.json`), if any.
+    #[serde(default)]
+    pub node: Option<String>,
+    /// Which file the Node pin came from (`.nvmrc`, `.node-version`, `package.json`).
+    #[serde(default)]
+    pub node_source: Option<String>,
 }
 
 /// One local database/cache service.

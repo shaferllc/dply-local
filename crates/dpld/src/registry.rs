@@ -154,6 +154,8 @@ impl Registry {
                     .get(&s.name)
                     .map(|r| (self.xdebug_installed(&r.php_bin), self.spx_installed(&r.php_bin)))
                     .unwrap_or((false, false));
+                // Node pin is a repo file, cheap to read here (like framework detection).
+                let node_pin = dpl_core::node::read_pin(&s.path);
                 SiteInfo {
                     host: s.host(),
                     url: s.url(),
@@ -171,6 +173,8 @@ impl Registry {
                     xdebug_installed,
                     profile: s.profile,
                     profile_installed,
+                    node: node_pin.as_ref().map(|p| p.version.clone()),
+                    node_source: node_pin.as_ref().map(|p| p.source.as_str().to_string()),
                 }
             })
             .collect();
@@ -196,6 +200,8 @@ impl Registry {
                 xdebug_installed: false,
                 profile: false,
                 profile_installed: false,
+                node: None,
+                node_source: None,
             });
         }
         infos.sort_by(|a, b| a.name.cmp(&b.name));
