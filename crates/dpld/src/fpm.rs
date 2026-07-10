@@ -100,36 +100,15 @@ impl FpmManager {
         let conf = write_conf(php_bin, mode, port)?;
         let log = log_file(php_bin, mode)?;
 
-        // Inject the dumps receiver env so `dumps()` works with zero config in
-        // any served site. `clear_env = no` in the pool config lets these reach
-        // the PHP workers.
         let mut cmd = Command::new(&fpm_bin);
-        cmd.arg("--nodaemonize")
-            .arg("--fpm-config")
-            .arg(&conf)
-            .env("DUMPS_HOST", "127.0.0.1")
-            .env("DUMPS_PORT", crate::dumps::port().to_string())
-            .env("DUMPS_ENABLED", "1");
-
-        // The pool runs with `clear_env = no`, so whatever environment launched
-        // the daemon reaches the PHP workers. Two Xdebug variables have to be
-        // neutralised or the user's shell quietly wins over dpl's config:
-        //
-        // - XDEBUG_CONFIG (e.g. `idekey=VSCODE`, commonly exported by dotfiles)
-        //   overrides ini settings, so `dpl xdebug ide`/`port` would do nothing.
-        // - XDEBUG_MODE is set below for *every* master, `off` included. Left to
-        //   the ambient value, an inherited `XDEBUG_MODE=debug` would switch on
-        //   an "off" master whenever the system conf.d already loads Xdebug.
-        cmd.env_remove("XDEBUG_CONFIG").env("XDEBUG_MODE", mode.as_str());
-
-        // libpq negotiates GSSAPI encryption before anything else unless told not
-        // to (`gssencmode` defaults to `prefer`). Probing for a Kerberos ticket
-        // pulls in the system Kerberos/Heimdal frameworks, which reach for
-        // CFPreferences and libdispatch — neither survives a fork. php-fpm workers
-        // *are* forks of this master, so the first pgsql connect in a worker
-        // segfaults and the site 502s with no PHP error to show for it. Nothing
-        // served locally authenticates to Postgres with Kerberos.
-        cmd.env("PGGSSENCMODE", "disable");
+        cmd.arg("--nodaemonize").arg("--fpm-config").arg(&conf);
+        for (key, value) in master_env(mode, crate::dumps::port()) {
+            cmd.env(key, value);
+        }
+        // XDEBUG_CONFIG (e.g. `idekey=VSCODE`, commonly exported by dotfiles) would
+        // override the ini so `dpl xdebug ide`/`port` do nothing — a removal, not a
+        // value, so it can't live in `master_env`.
+        cmd.env_remove("XDEBUG_CONFIG");
 
         // Only *load* Xdebug into masters that want it. `PHP_INI_SCAN_DIR` points
         // at dpl's own conf.d, prefixed with `:` so PHP still reads the system
@@ -178,6 +157,32 @@ impl FpmManager {
             }
         }
     }
+}
+
+/// The environment every php-fpm master carries, independent of the request.
+///
+/// Returned as data, not applied inline, so a test can assert the fork-safety
+/// variable survives. Its absence is a segfault that only surfaces on macOS under
+/// a long-lived master serving pgsql — never on a fresh dev restart, never in CI —
+/// so a silent drop in a future refactor would ship unnoticed. The pool runs with
+/// `clear_env = no`, so these reach the PHP workers.
+fn master_env(mode: &Mode, dumps_port: u16) -> Vec<(&'static str, String)> {
+    vec![
+        // Zero-config `dumps()` in any served site.
+        ("DUMPS_HOST", "127.0.0.1".to_string()),
+        ("DUMPS_PORT", dumps_port.to_string()),
+        ("DUMPS_ENABLED", "1".to_string()),
+        // Pinned for *every* master, `off` included: an inherited XDEBUG_MODE=debug
+        // would otherwise switch on an "off" master that loads Xdebug via conf.d.
+        ("XDEBUG_MODE", mode.as_str().to_string()),
+        // libpq negotiates GSSAPI before anything else (`gssencmode` defaults to
+        // `prefer`), reaching Kerberos → CFPreferences → libdispatch — none of them
+        // fork-safe. php-fpm workers are forks of this master, so the first pgsql
+        // connect in a worker lands in libdispatch with invalid post-fork state and
+        // segfaults; the site 502s with no PHP error to show for it. Nothing served
+        // locally authenticates to Postgres with Kerberos, so disabling it is free.
+        ("PGGSSENCMODE", "disable".to_string()),
+    ]
 }
 
 /// Derive the `php-fpm` binary from a `php` binary path:
@@ -274,5 +279,31 @@ mod tests {
         let a = master_dir(php, &Mode::parse("debug,develop").unwrap()).unwrap();
         let b = master_dir(php, &Mode::parse("develop,debug").unwrap()).unwrap();
         assert_eq!(a, b);
+    }
+
+    /// The one that matters: dropping this reintroduces a macOS segfault that no
+    /// other test can catch (it needs a real forked worker under an aged master).
+    #[test]
+    fn every_master_disables_fork_unsafe_gssapi() {
+        for mode in [Mode::off(), Mode::parse("debug").unwrap()] {
+            let env = master_env(&mode, 9912);
+            assert!(
+                env.iter().any(|(k, v)| *k == "PGGSSENCMODE" && v == "disable"),
+                "PGGSSENCMODE=disable missing for mode {mode:?}: {env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn master_env_pins_xdebug_mode_even_when_off() {
+        let env = master_env(&Mode::off(), 9912);
+        let xdebug = env.iter().find(|(k, _)| *k == "XDEBUG_MODE");
+        assert_eq!(xdebug.map(|(_, v)| v.as_str()), Some("off"));
+    }
+
+    #[test]
+    fn master_env_carries_the_dumps_receiver_port() {
+        let env = master_env(&Mode::off(), 4321);
+        assert!(env.iter().any(|(k, v)| *k == "DUMPS_PORT" && v == "4321"));
     }
 }
