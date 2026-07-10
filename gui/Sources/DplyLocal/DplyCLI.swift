@@ -12,8 +12,17 @@ enum DplyError: LocalizedError {
             return "Couldn't find the `dpl` binary. Tried:\n" + tried.joined(separator: "\n")
                 + "\n\nBuild it with `cargo build` in the workspace, or set a path in Settings."
         case .commandFailed(let cmd, let status, let stderr):
-            let msg = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return "`\(cmd)` failed (exit \(status))." + (msg.isEmpty ? "" : "\n\(msg)")
+            // dpl's own errors are already written for a human and arrive as
+            // "error: <message>". Lead with that; the "`cmd` failed (exit N)"
+            // wrapper is noise once there's a real message. Fall back to it only
+            // when the command died without saying anything useful.
+            var msg = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !msg.isEmpty else { return "`\(cmd)` failed (exit \(status))." }
+            if msg.hasPrefix("error: ") { msg.removeFirst("error: ".count) }
+            if let first = msg.first, first.isLowercase {
+                msg = first.uppercased() + msg.dropFirst()
+            }
+            return msg
         case .decodeFailed(let cmd, let underlying):
             return "Couldn't parse JSON from `\(cmd)`: \(underlying.localizedDescription)"
         }

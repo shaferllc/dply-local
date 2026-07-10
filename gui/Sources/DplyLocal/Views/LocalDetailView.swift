@@ -202,12 +202,14 @@ struct LocalDetailView: View {
                                 .buttonStyle(.bordered)
                                 .tint(nodeVersion == v ? Theme.violet : nil)
                         }
-                        if nodeVersion == nil || nodeSource == "package.json" {
+                        // Only offer Detect when package.json actually has an
+                        // engines.node to read — otherwise it can only fail.
+                        if nodeSource == "package.json" {
                             Button {
                                 Task { nodeBusy = true; await store.detectNodeVersion(name: name); nodeBusy = false }
                             } label: { Label("Detect", systemImage: "wand.and.stars") }
                                 .buttonStyle(.bordered)
-                                .help("Read the version from this repo's package.json")
+                                .help("Pin the version from this repo's package.json engines.node")
                         }
                         Button { nodeDraft = nodeVersion ?? ""; editingNode = true } label: {
                             Image(systemName: "pencil")
