@@ -163,7 +163,9 @@ struct LogTailView: View {
     @State private var lines: [String] = []
     @State private var live = true
 
-    private static let ansi = try! NSRegularExpression(pattern: "\\u{1B}\\[[0-9;]*m")
+    // The pattern needs a real ESC byte, not the text "\u{1B}" — ICU rejects the
+    // brace form. `try?` so a bad pattern degrades to "don't strip", never a crash.
+    private static let ansi = try? NSRegularExpression(pattern: "\u{1B}\\[[0-9;]*m")
 
     var body: some View {
         VStack(spacing: 0) {
@@ -223,7 +225,8 @@ struct LogTailView: View {
     }
 
     private func stripAnsi(_ s: String) -> String {
+        guard let ansi = Self.ansi else { return s }
         let range = NSRange(s.startIndex..., in: s)
-        return Self.ansi.stringByReplacingMatches(in: s, range: range, withTemplate: "")
+        return ansi.stringByReplacingMatches(in: s, range: range, withTemplate: "")
     }
 }
