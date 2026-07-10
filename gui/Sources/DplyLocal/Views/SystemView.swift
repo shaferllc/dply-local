@@ -22,16 +22,17 @@ struct SystemView: View {
     private enum LogSource {
         case file(String)                 // ~/.dpl/logs/<file>
         case filtered(String, String)     // file, keep only lines containing …
+        case fpm                          // the most-recently-active php-fpm pool log
     }
 
     private let subsystems: [Subsystem] = [
         .init(id: "Traffic",   statusTitle: "HTTP proxy",         log: .file("access.log")),
         .init(id: "Daemon",    statusTitle: "Daemon",             log: .file("dpld.out.log")),
+        .init(id: "PHP-FPM",   statusTitle: "Installed versions", log: .fpm),
         .init(id: "DNS",       statusTitle: "DNS responder",      log: .filtered("dpld.out.log", "dns")),
         .init(id: "Mail",      statusTitle: "Mail sink",          log: .filtered("dpld.out.log", "mail")),
         .init(id: "Dumps",     statusTitle: "Debug bridge",       log: .filtered("dpld.out.log", "dumps")),
         .init(id: "TLS",       statusTitle: "Local CA",           log: nil),
-        .init(id: "PHP",       statusTitle: "Installed versions", log: nil),
     ]
 
     private var current: Subsystem { subsystems.first { $0.id == selected } ?? subsystems[0] }
@@ -114,6 +115,12 @@ struct SystemView: View {
                 LogTailView(path: logPath(f), filter: nil)
             case .filtered(let f, let contains):
                 LogTailView(path: logPath(f), filter: contains)
+            case .fpm:
+                if let path = newestFpmLog() {
+                    LogTailView(path: path, filter: nil)
+                } else {
+                    configPane(sub, check: check)
+                }
             case nil:
                 configPane(sub, check: check)
             }
@@ -152,6 +159,24 @@ struct SystemView: View {
     private func logPath(_ file: String) -> String {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".dpl/logs/\(file)").path
+    }
+
+    /// php-fpm logs live per version + mode at `~/.dpl/php/<key>/fpm-<mode>/fpm.log`.
+    /// Show the most-recently-written one — the pool actually serving traffic.
+    private func newestFpmLog() -> String? {
+        let fm = FileManager.default
+        let base = fm.homeDirectoryForCurrentUser.appendingPathComponent(".dpl/php")
+        guard let versions = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return nil }
+        var newest: (path: String, at: Date)?
+        for version in versions {
+            guard let pools = try? fm.contentsOfDirectory(at: version, includingPropertiesForKeys: nil) else { continue }
+            for pool in pools where pool.lastPathComponent.hasPrefix("fpm-") {
+                let log = pool.appendingPathComponent("fpm.log").path
+                guard let mod = (try? fm.attributesOfItem(atPath: log))?[.modificationDate] as? Date else { continue }
+                if newest == nil || mod > newest!.at { newest = (log, mod) }
+            }
+        }
+        return newest?.path
     }
 }
 
