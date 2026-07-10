@@ -122,6 +122,15 @@ impl FpmManager {
         //   an "off" master whenever the system conf.d already loads Xdebug.
         cmd.env_remove("XDEBUG_CONFIG").env("XDEBUG_MODE", mode.as_str());
 
+        // libpq negotiates GSSAPI encryption before anything else unless told not
+        // to (`gssencmode` defaults to `prefer`). Probing for a Kerberos ticket
+        // pulls in the system Kerberos/Heimdal frameworks, which reach for
+        // CFPreferences and libdispatch — neither survives a fork. php-fpm workers
+        // *are* forks of this master, so the first pgsql connect in a worker
+        // segfaults and the site 502s with no PHP error to show for it. Nothing
+        // served locally authenticates to Postgres with Kerberos.
+        cmd.env("PGGSSENCMODE", "disable");
+
         // Only *load* Xdebug into masters that want it. `PHP_INI_SCAN_DIR` points
         // at dpl's own conf.d, prefixed with `:` so PHP still reads the system
         // one. Sites with Xdebug off never load the extension at all.
