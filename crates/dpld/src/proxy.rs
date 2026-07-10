@@ -199,14 +199,36 @@ async fn serve_site(
 }
 
 /// What to do with a request path within a document root.
+#[derive(Debug)]
 enum Target {
     Static(PathBuf),
     Php { script: PathBuf, script_name: String, path_info: String },
     NotFound,
 }
 
+/// URL prefixes that only ever contain files on disk.
+///
+/// `/build` is Vite's output; `/storage` is the symlink into `storage/app/public`.
+/// Nothing routes through PHP under either, so a miss there is a genuine 404.
+///
+/// This list is deliberately about *directories*, not extensions. A missing
+/// `.js` is not automatically a 404 — Livewire and friends serve real assets from
+/// PHP routes with no file behind them, and short-circuiting on extension would
+/// return 404 for a file the app was about to generate.
+const STATIC_ONLY_PREFIXES: &[&str] = &["/build/", "/storage/"];
+
+/// Whether a miss at `url_path` should 404 rather than boot the front controller.
+fn is_static_only(url_path: &str) -> bool {
+    STATIC_ONLY_PREFIXES.iter().any(|prefix| url_path.starts_with(prefix))
+}
+
 /// `try_files`-style resolution: real file → serve/execute it; a directory →
 /// its index; otherwise fall through to the front controller `index.php`.
+///
+/// The fallback is not free: it boots the whole framework to render an error page
+/// (81KB, with the debugbar, in a dev Laravel app) and occupies a php-fpm worker
+/// for the duration. Under load that turns a page's worth of missing assets into a
+/// worker shortage. Misses under a static-only prefix skip it.
 fn resolve_target(docroot: &Path, url_path: &str) -> Target {
     let rel = sanitize(url_path);
     let candidate = docroot.join(&rel);
@@ -231,6 +253,11 @@ fn resolve_target(docroot: &Path, url_path: &str) -> Target {
         } else {
             Target::Static(candidate)
         };
+    }
+
+    // A miss under a build-output directory is final — don't wake PHP to say so.
+    if is_static_only(url_path) {
+        return Target::NotFound;
     }
 
     // Front controller fallback.
@@ -460,4 +487,103 @@ fn html(status: StatusCode, body: Vec<u8>) -> Response<ProxyBody> {
 
 fn boxed<E: Into<Box<dyn StdError + Send + Sync>>>(e: E) -> Box<dyn StdError + Send + Sync> {
     e.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A throwaway docroot. No `tempfile` dep here, so build one by hand and
+    /// name it uniquely — tests share a process and run in parallel.
+    struct Docroot(PathBuf);
+
+    impl Docroot {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("dpld-proxy-{}-{}", std::process::id(), tag));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create docroot");
+            Docroot(dir)
+        }
+
+        fn file(&self, rel: &str) -> &Self {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("create parent");
+            std::fs::write(&path, b"x").expect("write file");
+            self
+        }
+
+        fn dir(&self, rel: &str) -> &Self {
+            std::fs::create_dir_all(self.0.join(rel)).expect("create dir");
+            self
+        }
+    }
+
+    impl Drop for Docroot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn is_php(t: &Target) -> bool {
+        matches!(t, Target::Php { .. })
+    }
+
+    #[test]
+    fn a_missing_build_asset_is_a_plain_404_not_a_php_boot() {
+        let root = Docroot::new("build-miss");
+        root.file("index.php").dir("build/assets");
+        let target = resolve_target(&root.0, "/build/assets/app-abc123.js");
+        assert!(matches!(target, Target::NotFound), "expected 404, got a PHP boot");
+    }
+
+    #[test]
+    fn a_missing_storage_file_is_a_plain_404() {
+        let root = Docroot::new("storage-miss");
+        root.file("index.php");
+        assert!(matches!(resolve_target(&root.0, "/storage/nope.png"), Target::NotFound));
+    }
+
+    /// The whole point of keying on directories: a missing `.js` elsewhere may be a
+    /// PHP route (Livewire serves `/livewire/livewire.js` with no file on disk).
+    #[test]
+    fn a_missing_js_outside_those_dirs_still_reaches_the_front_controller() {
+        let root = Docroot::new("livewire");
+        root.file("index.php");
+        assert!(is_php(&resolve_target(&root.0, "/livewire/livewire.js")));
+    }
+
+    #[test]
+    fn a_build_asset_that_exists_is_served_from_disk() {
+        let root = Docroot::new("build-hit");
+        root.file("index.php").file("build/assets/app.js");
+        match resolve_target(&root.0, "/build/assets/app.js") {
+            Target::Static(path) => assert!(path.ends_with("build/assets/app.js")),
+            other => panic!("expected a static file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_pretty_urls_still_reach_the_front_controller() {
+        let root = Docroot::new("pretty");
+        root.file("index.php");
+        assert!(is_php(&resolve_target(&root.0, "/dashboard/settings")));
+    }
+
+    /// `/buildings` starts with "/build" but is not inside `/build/`.
+    #[test]
+    fn a_prefix_that_merely_starts_with_build_is_not_static_only() {
+        assert!(!is_static_only("/buildings/list"));
+        assert!(!is_static_only("/build"));
+        assert!(is_static_only("/build/app.js"));
+        assert!(is_static_only("/storage/a/b.png"));
+    }
+
+    #[test]
+    fn a_traversal_out_of_build_cannot_smuggle_a_php_boot() {
+        // sanitize() drops `..`, so this resolves inside the docroot; either way it
+        // must not escape, and the static-only prefix still applies.
+        let root = Docroot::new("traversal");
+        root.file("index.php");
+        assert!(matches!(resolve_target(&root.0, "/build/../secret.php"), Target::NotFound));
+    }
 }
