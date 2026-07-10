@@ -80,6 +80,10 @@ pub enum Request {
     /// Turn the SPX flame-graph profiler on or off for a site. The site gets (or
     /// loses) its own php-fpm master with SPX loaded.
     SetProfile { site: String, on: bool },
+    /// Set (or clear, when `script` is None) a site's opcache preload script,
+    /// relative to its project root. A preloaded site gets its own php-fpm master
+    /// with `opcache.preload` set.
+    SetPreload { site: String, script: Option<String> },
     /// Manage reverse proxies. `action` ∈ set|remove (list is via ListSites).
     Proxy { action: String, name: String, target: Option<String> },
     /// Pin a PHP version for a site (or set the default when `site` is None).
@@ -205,6 +209,9 @@ pub struct SiteInfo {
     /// Whether SPX is installed for this site's PHP version at all.
     #[serde(default)]
     pub profile_installed: bool,
+    /// This site's opcache preload script (relative to the project root), if set.
+    #[serde(default)]
+    pub preload: Option<String>,
     /// Pinned Node version for this site (from `.nvmrc`/`.node-version`/
     /// `package.json`), if any.
     #[serde(default)]

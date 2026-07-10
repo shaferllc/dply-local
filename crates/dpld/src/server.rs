@@ -180,6 +180,9 @@ async fn dispatch(
         Request::SetProfile { site, on } => {
             mutate(state, |r| r.set_profile(&site, on)).await
         }
+        Request::SetPreload { site, script } => {
+            mutate(state, |r| r.set_preload(&site, script)).await
+        }
         Request::Proxy { action, name, target } => match action.as_str() {
             "set" => match target {
                 Some(t) => mutate(state, |r| r.proxy_set(&name, &t)).await,

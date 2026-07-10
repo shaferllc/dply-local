@@ -104,6 +104,20 @@ fn run() -> Result<()> {
             }
             Some(cli::ProfileCmd::Open { site }) => commands::profile::open(home.as_deref(), site),
         },
+        Command::Preload { command } => match command {
+            None | Some(cli::PreloadCmd::Status) => {
+                commands::preload::status(home.as_deref(), args.json)
+            }
+            Some(cli::PreloadCmd::Generate { site }) => {
+                commands::preload::generate(home.as_deref(), site)
+            }
+            Some(cli::PreloadCmd::On { site, script }) => {
+                commands::preload::set(home.as_deref(), site, Some(script))
+            }
+            Some(cli::PreloadCmd::Off { site }) => {
+                commands::preload::set(home.as_deref(), site, None)
+            }
+        },
         Command::Node { command } => match command {
             None | Some(cli::NodeCmd::Status) => commands::node::status(home.as_deref(), args.json),
             Some(cli::NodeCmd::Use { version, site }) => {

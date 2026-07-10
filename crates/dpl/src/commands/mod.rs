@@ -8,6 +8,7 @@ pub mod local;
 pub mod mail;
 pub mod node;
 pub mod parity;
+pub mod preload;
 pub mod profile;
 pub mod valet;
 pub mod xdebug;

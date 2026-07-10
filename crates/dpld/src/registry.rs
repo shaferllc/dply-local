@@ -157,6 +157,13 @@ impl Registry {
                     .unwrap_or((false, false));
                 // Node pin is a repo file, cheap to read here (like framework detection).
                 let node_pin = dpl_core::node::read_pin(&s.path);
+                // Show the preload script as configured (relative to the project).
+                let preload = self
+                    .config
+                    .links
+                    .get(&s.name)
+                    .and_then(|l| l.preload.as_ref())
+                    .map(|p| p.to_string_lossy().into_owned());
                 SiteInfo {
                     host: s.host(),
                     url: s.url(),
@@ -174,6 +181,7 @@ impl Registry {
                     xdebug_installed,
                     profile: s.profile,
                     profile_installed,
+                    preload,
                     node: node_pin.as_ref().map(|p| p.version.clone()),
                     node_source: node_pin.as_ref().map(|p| p.source.as_str().to_string()),
                 }
@@ -201,6 +209,7 @@ impl Registry {
                 xdebug_installed: false,
                 profile: false,
                 profile_installed: false,
+                preload: None,
                 node: None,
                 node_source: None,
             });
@@ -718,6 +727,42 @@ impl Registry {
                 }
             }
             None => Ok(format!("the profiler applies to linked sites only; {name} is not linked.")),
+        }
+    }
+
+    /// Set or clear a site's opcache preload script (relative to the project
+    /// root). Only linked sites can opt in — a parked site would forget it on the
+    /// next reconcile. Enabling verifies the script exists so a typo fails loudly
+    /// here rather than making php-fpm refuse to serve.
+    pub fn set_preload(&mut self, name: &str, script: Option<String>) -> Result<String> {
+        let name = name.to_lowercase();
+        let Some(link) = self.config.links.get_mut(&name) else {
+            return Ok(format!("preload applies to linked sites only; {name} is not linked."));
+        };
+        match script {
+            Some(rel) => {
+                let abs = link.path.join(&rel);
+                if !abs.is_file() {
+                    anyhow::bail!(
+                        "no preload script at {}. Scaffold one with `dpl preload generate {name}`.",
+                        abs.display()
+                    );
+                }
+                link.preload = Some(rel.clone().into());
+                self.save()?;
+                self.reconcile();
+                Ok(format!(
+                    "Preload on for {name}.test using {rel} — its own php-fpm master will \
+                     compile it into opcache at startup. Preloaded code is frozen until the \
+                     master restarts, so keep the script to vendor/framework, not app code."
+                ))
+            }
+            None => {
+                link.preload = None;
+                self.save()?;
+                self.reconcile();
+                Ok(format!("Preload off for {name}.test — it folds back into the shared master."))
+            }
         }
     }
 

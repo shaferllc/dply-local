@@ -190,6 +190,13 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ProfileCmd>,
     },
+    /// Opcache preload per site — compile a site's (typically vendor) code into
+    /// shared memory once at php-fpm start, so the first request is warm. `dpl
+    /// preload` shows status; `generate` scaffolds a script; `on`/`off` toggle it.
+    Preload {
+        #[command(subcommand)]
+        command: Option<PreloadCmd>,
+    },
     /// Per-project Node version, via fnm/nvm. `dpl node` shows each site's pinned
     /// version; `use` writes its `.nvmrc`; `install` installs a version.
     Node {
@@ -431,6 +438,37 @@ pub enum ProfileCmd {
     },
     /// Open the flame-graph UI for a site in your browser.
     Open {
+        /// Linked site name.
+        site: String,
+    },
+}
+
+/// Opcache preload operations. `dpl preload` with no subcommand shows each site's
+/// status. A preloaded site runs on its own php-fpm master with `opcache.preload`
+/// set, so its script's code is compiled into shared memory once at startup.
+///
+/// Preloaded entries are frozen for the master's life — edits don't take effect
+/// until it restarts — so preload vendor/framework code, not the app code you're
+/// actively editing. `generate` scaffolds a script with those defaults.
+#[derive(Subcommand)]
+pub enum PreloadCmd {
+    /// Show each site's preload status (the default with no subcommand).
+    Status,
+    /// Scaffold a starter `dpl-preload.php` in the project (vendor-first).
+    Generate {
+        /// Linked site name; omit to use the current directory.
+        site: Option<String>,
+    },
+    /// Turn preload on for a site (defaults to `dpl-preload.php`).
+    On {
+        /// Linked site name.
+        site: String,
+        /// Preload script path, relative to the project root.
+        #[arg(long, default_value = "dpl-preload.php")]
+        script: String,
+    },
+    /// Turn preload off for a site; it folds back into the shared master.
+    Off {
         /// Linked site name.
         site: String,
     },
