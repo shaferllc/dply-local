@@ -34,9 +34,12 @@ struct DplyCLI {
 
     // MARK: Binary resolution
 
-    /// Locate the `dpl` binary. Order: explicit override → the workspace's
-    /// debug/release build (found relative to this source file) → `dpl` on
-    /// `PATH`.
+    /// Locate the `dpl` binary. Order: explicit override → the *newest* workspace
+    /// build (found relative to this source file) → `dpl` on `PATH`.
+    ///
+    /// Newest, not release-then-debug. Building release once would otherwise pin the
+    /// app to that binary forever, silently ignoring every `cargo build` after it —
+    /// the app would keep reporting a world that stopped existing, with no clue why.
     func resolveBinary() throws -> String {
         var tried: [String] = []
 
@@ -45,10 +48,17 @@ struct DplyCLI {
             tried.append(override + " (from Settings)")
         }
 
-        for candidate in workspaceBinaryCandidates() {
-            tried.append(candidate)
-            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
-        }
+        let candidates = workspaceBinaryCandidates()
+        tried.append(contentsOf: candidates)
+        let newest = candidates
+            .filter { FileManager.default.isExecutableFile(atPath: $0) }
+            .compactMap { path -> (String, Date)? in
+                let modified = try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date
+                return (modified ?? nil).map { (path, $0) }
+            }
+            .max { $0.1 < $1.1 }?
+            .0
+        if let newest { return newest }
 
         if let onPath = which("dpl") {
             return onPath

@@ -45,6 +45,13 @@ struct DoctorPage: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task { if store.doctorHealth == nil { await store.refreshDoctor() } }
+        // A report is a snapshot of the machine, not a fact about it. Held for the
+        // life of the process it goes quietly wrong: install Homebrew, rebuild the
+        // `dpl` it probes with, and the page still shows what was true at launch.
+        // Re-probe whenever the user comes back to the app.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await store.refreshDoctor() }
+        }
     }
 
     // MARK: Header
