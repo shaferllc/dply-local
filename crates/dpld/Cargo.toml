@@ -11,6 +11,7 @@ name = "dpld"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { workspace = true }
 dpl-core = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

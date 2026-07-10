@@ -5,6 +5,7 @@
 //! backends. Later phases attach DNS, HTTPS, multi-PHP, and DB services to this
 //! same process.
 
+mod access;
 mod appserver;
 mod ca;
 mod dns;
@@ -59,6 +60,10 @@ fn main() -> anyhow::Result<()> {
                  :80/:443 to this daemon via launchd, then browse http://<name>.test with no port."
             );
         }
+
+        // Start the access-log writer so the proxy can record traffic from the
+        // first request.
+        access::init();
 
         // Reap php-fpm masters leaked by a previous (SIGKILLed) daemon before
         // we spawn fresh ones, so they don't accumulate across restarts.

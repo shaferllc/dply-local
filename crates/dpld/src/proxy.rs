@@ -95,22 +95,39 @@ pub(crate) async fn handle(
         .map(strip_port)
         .unwrap_or_default();
 
-    // One lock: look up both a reverse-proxy target and a servable route.
-    let (proxy, route) = {
+    // Captured before `req` is consumed downstream, for the access log.
+    let start = std::time::Instant::now();
+    let method = req.method().to_string();
+    let target = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+
+    // One lock: look up the site name, a reverse-proxy target, and a route.
+    let (site_name, proxy, route) = {
         let reg = registry.lock().await;
         match reg.site_for_host(&host) {
-            Some(name) => (reg.proxy_target(&name), reg.resolve_request(&name)),
-            None => (None, None),
+            Some(name) => (Some(name.clone()), reg.proxy_target(&name), reg.resolve_request(&name)),
+            None => (None, None, None),
         }
     };
 
-    if let Some(target) = proxy {
-        return Ok(forward_proxy(req, &target, https).await);
-    }
-    match route {
-        Some(route) => Ok(serve_site(req, route, &host, server_port, https).await),
-        None => Ok(fallback_index(&registry, &host).await),
-    }
+    let response = if let Some(target) = proxy {
+        forward_proxy(req, &target, https).await
+    } else {
+        match route {
+            Some(route) => serve_site(req, route, &host, server_port, https).await,
+            None => fallback_index(&registry, &host).await,
+        }
+    };
+
+    crate::access::record(
+        "127.0.0.1",
+        &method,
+        &target,
+        &host,
+        site_name.as_deref(),
+        response.status().as_u16(),
+        start.elapsed().as_millis(),
+    );
+    Ok(response)
 }
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Incoming>;
