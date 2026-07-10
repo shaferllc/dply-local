@@ -1492,6 +1492,15 @@ final class Store: ObservableObject {
             return
         }
         if parts[0] != "dpl" {
+            // A non-dpl fix (`brew install composer`) needs its own program present.
+            // Opening Terminal to `brew: command not found` teaches the user nothing;
+            // name what's actually missing. Absolute paths — the Homebrew installer's
+            // `/bin/bash` — are taken as given, since that fix is what provides brew.
+            let program = parts[0]
+            if !program.hasPrefix("/"), await backgroundQuiet({ whichExists(program) }) != true {
+                lastError = "`\(program)` isn't installed, so this fix can't run yet — install \(program) first."
+                return
+            }
             guard let dpl = try? cli.resolveBinary() else { return }
             let command = parts.map { $0 == "dpl" ? dpl : $0 }.joined(separator: " ")
             runInTerminal(command)

@@ -20,20 +20,28 @@ Rootless for daily use; elevates once at setup. macOS + Linux.
 
 ## Status
 
-**Phase 0 (foundation) and Phase 1 (dply integration) are done.**
+**Phases 0–6 are in.** dply-local is a working local dev environment.
 
-- `dpl ping` / `dpl status` / `dpl version` round-trip to the `dpld` daemon over
-  a per-user unix socket (length-prefixed JSON, versioned handshake).
-- `dpl dply …` mirrors the whole dply CLI surface — `edge:*`, `sites:*`,
-  `site:env`, `servers:*`, `insights:*`, `imports:*`, `operator:*` — with
-  `--host` and `--json` on every command.
-- `dpl login` uses the dply device-authorization flow and stores the token in
-  the **shared `~/.dply/config.json`**, so a login here is honoured by the
-  existing PHP `dply` CLI and vice-versa.
+- **dply integration** — `dpl dply …` mirrors the whole dply CLI surface
+  (`edge:*`, `sites:*`, `site:env`, `servers:*`, `insights:*`, `imports:*`,
+  `operator:*`) with `--host`/`--json`; `dpl login` uses the device-auth flow and
+  shares `~/.dply/config.json` with the PHP `dply` CLI both ways.
+- **Local serving** — `.test` sites over an HTTP/HTTPS proxy to per-site php-fpm
+  pools, wildcard DNS responder, and a local CA for trusted HTTPS. `:80`/`:443`
+  are handed to `dpld` by a launchd-activated socket (installed via
+  `dpl setup`); the daemon runs as the login user, never root.
+- **PHP** — multi-version management and per-site pinning, an extension manager,
+  and per-site Xdebug modes (one php-fpm pool per mode).
+- **Services** — database engines, mail capture (SMTP sink with per-site
+  mailboxes + a MIME/HTML viewer), a debug-dump receiver, and Cloudflare tunnels.
+- **Tooling** — `dpl doctor` health checks with one-click fixes, `dpl parity`,
+  and Valet import.
+- **GUI** — `DplyLocal.app` (SwiftUI), a native front-end that drives the same
+  `dpl` binary the terminal uses; privileged setup runs in-app behind the macOS
+  authorization sheet.
 
-Later phases (roadmap): local `.test` HTTP proxy → PHP-FPM, DNS + `dpl-helper`,
-HTTPS via a local CA, multi-PHP management, database services, mail capture,
-Cloudflare tunnels, and a **site-management GUI**.
+Not yet: a Developer ID-signed bundle (so setup could use `SMAppService` for a
+resident helper instead of a per-invocation authorization prompt).
 
 ## Build & run
 

@@ -296,9 +296,11 @@ struct DoctorFixButton: View {
                     copied = true
                     try? await Task.sleep(for: .seconds(2))
                     copied = false
-                } else if !fix.sudo {
-                    // A sudo fix runs in Terminal and finishes on its own
-                    // schedule, so only re-run for the in-process ones.
+                } else {
+                    // sudo and in-process fixes both complete before runFix returns
+                    // (the sheet is modal; the CLI call is awaited), so re-run the
+                    // report for either. Only a `brew install …` handed to Terminal
+                    // finishes on its own schedule — and runFix doesn't await that.
                     if let onFixed { await onFixed() } else { await store.refreshDoctor() }
                 }
                 busy = false
@@ -324,6 +326,7 @@ struct DoctorFixButton: View {
 
     private var helpText: String {
         if fix.needsEditing { return "Copies (it needs a value you must fill in): \(fix.command)" }
-        return fix.sudo ? "Opens Terminal: \(fix.command)" : "Runs: \(fix.command)"
+        return fix.sudo ? "Runs as administrator (asks for your password): \(fix.command)"
+                        : "Runs: \(fix.command)"
     }
 }
