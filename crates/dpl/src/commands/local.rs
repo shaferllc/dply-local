@@ -535,6 +535,48 @@ pub fn php_fix(version: &str) -> Result<()> {
     Ok(())
 }
 
+/// Open a Laravel Tinker REPL for a site, on the site's pinned PHP.
+///
+/// Interactive by design: it inherits this process's stdio and `exec`s into
+/// `php artisan tinker`, so running it in a terminal drops you straight into the
+/// REPL. The GUI launches it in Terminal.
+pub fn tinker(home: Option<&str>, name: Option<String>) -> Result<()> {
+    let cfg_path = dpl_core::paths::local_config(home)?;
+    let cfg = dpl_core::config::LocalConfig::load(&cfg_path)?;
+
+    // Resolve the project directory and its effective PHP version.
+    let (dir, version) = match name {
+        Some(name) => {
+            let name = name.to_lowercase();
+            let site = dpl_core::sites::resolve(&cfg)
+                .into_iter()
+                .find(|s| s.name == name)
+                .with_context(|| format!("no local site named {name}. See `dpl sites`."))?;
+            (site.path, site.php)
+        }
+        None => (std::env::current_dir().context("resolving the current directory")?, cfg.default_php.clone()),
+    };
+
+    let artisan = dir.join("artisan");
+    if !artisan.is_file() {
+        anyhow::bail!("no `artisan` in {} — Tinker needs a Laravel project.", dir.display());
+    }
+
+    let php = version
+        .as_deref()
+        .and_then(dpl_core::php::resolve)
+        .unwrap_or_else(dpl_core::php::default_binary);
+
+    println!("Tinker · {} · {}\n", dir.display(), php.display());
+    let status = std::process::Command::new(&php)
+        .arg("artisan")
+        .arg("tinker")
+        .current_dir(&dir)
+        .status()
+        .with_context(|| format!("running {} artisan tinker", php.display()))?;
+    std::process::exit(status.code().unwrap_or(0));
+}
+
 /// Show (and optionally follow) a local site's request log.
 pub fn logs(home: Option<&str>, name: Option<String>, lines: usize, follow: bool) -> Result<()> {
     let name = resolve_name(name)?;

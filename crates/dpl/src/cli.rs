@@ -125,6 +125,11 @@ pub enum Command {
         #[arg(short, long)]
         follow: bool,
     },
+    /// Open a Laravel Tinker REPL for a site, on its pinned PHP version.
+    Tinker {
+        /// Site name (default: the current directory).
+        site: Option<String>,
+    },
     /// Share a local site publicly via a Cloudflare quick tunnel.
     Share {
         /// Site name (default: current directory's name).

@@ -23,6 +23,7 @@ struct LocalDetailView: View {
         return v.isEmpty ? "default" : v
     }
     private var requiresPhp: String { site.cell(["requires_php"]) }
+    private var isLaravel: Bool { site.cell(["framework"]).localizedCaseInsensitiveContains("laravel") }
     /// The PHP version this site actually runs on (its pin, else the default).
     private var effectivePhp: String {
         let pinned = site.cell(["php"])
@@ -342,6 +343,15 @@ struct LocalDetailView: View {
                             .disabled(!isServing).fixedSize()
                         Button { showShare = true } label: { Label("Share", systemImage: "antenna.radiowaves.left.and.right") }
                             .disabled(!isServing).fixedSize()
+
+                        // Tinker only exists for Laravel; opens in Terminal (a REPL).
+                        if isLaravel {
+                            Button { store.openTinker(name) } label: {
+                                Label("Tinker", systemImage: "terminal")
+                            }
+                            .fixedSize()
+                            .help("Open a Tinker REPL on this site's PHP")
+                        }
 
                         // Parity only means something for a linked project that
                         // has a dply site to deploy to.

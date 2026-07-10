@@ -1355,6 +1355,13 @@ final class Store: ObservableObject {
         }
     }
 
+    /// Open a Laravel Tinker REPL for a site in Terminal — Tinker is interactive,
+    /// so it can't run headless inside the app.
+    func openTinker(_ name: String) {
+        guard let dpl = try? cli.resolveBinary() else { return }
+        runInTerminal("'\(dpl)' tinker \(name)")
+    }
+
     /// Run a shell command in a new Terminal window (for steps needing sudo or
     /// live output, e.g. `brew install php`).
     func runInTerminal(_ command: String) {

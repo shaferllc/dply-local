@@ -75,6 +75,7 @@ fn run() -> Result<()> {
         Command::Logs { name, lines, follow } => {
             commands::local::logs(home.as_deref(), name, lines, follow)
         }
+        Command::Tinker { site } => commands::local::tinker(home.as_deref(), site),
         Command::Share { name } => commands::local::share(home.as_deref(), name),
         Command::Start => commands::daemon::manage(home.as_deref(), "start".into()),
         Command::Stop => commands::daemon::manage(home.as_deref(), "stop".into()),
