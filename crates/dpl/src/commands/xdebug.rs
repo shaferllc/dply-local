@@ -49,7 +49,7 @@ pub fn status(home: Option<&str>, json: bool) -> Result<()> {
 
     println!("IDE  127.0.0.1:{}  (idekey {})\n", settings.client_port, settings.ide_key);
     let width = sites.iter().map(|s| s.name.len()).max().unwrap_or(4).max(4);
-    println!("{:<width$}  {:<8}  {:<16}  {}", "SITE", "PHP", "XDEBUG", "", width = width);
+    println!("{:<width$}  {:<8}  {:<16}  ", "SITE", "PHP", "XDEBUG", width = width);
     for s in &sites {
         let mode = s.xdebug.as_deref().unwrap_or("off");
         // "installed" only matters when a site actually wants Xdebug.

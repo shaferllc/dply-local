@@ -21,7 +21,6 @@ use crate::fpm::{FpmManager, MasterKey};
 
 /// Everything the proxy needs to serve one request for a site.
 pub struct SiteRoute {
-    pub name: String,
     pub docroot: PathBuf,
     pub fpm_addr: SocketAddr,
     pub secure: bool,
@@ -125,7 +124,6 @@ impl Registry {
             None => return None,
         };
         Some(SiteRoute {
-            name: site_name.to_string(),
             docroot: route.docroot.clone(),
             fpm_addr,
             secure: route.secure,
@@ -206,16 +204,6 @@ impl Registry {
         }
         infos.sort_by(|a, b| a.name.cmp(&b.name));
         infos
-    }
-
-    /// Names of sites that want HTTPS — used by the TLS listener to know which
-    /// certs to have ready.
-    pub fn secure_site_names(&self) -> Vec<String> {
-        self.routes
-            .iter()
-            .filter(|(_, r)| r.secure)
-            .map(|(n, _)| n.clone())
-            .collect()
     }
 
     /// Start php-fpm masters for every PHP version in use, stop unused ones,
@@ -787,13 +775,6 @@ fn helper_path() -> Option<PathBuf> {
     }
     let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!p.is_empty()).then(|| PathBuf::from(p))
-}
-
-fn php_bin_for(site: &ResolvedSite) -> PathBuf {
-    match &site.php {
-        Some(v) => dpl_core::php::resolve(v).unwrap_or_else(dpl_core::php::default_binary),
-        None => dpl_core::php::default_binary(),
-    }
 }
 
 /// Resolve a user-supplied path to an absolute, canonical form.

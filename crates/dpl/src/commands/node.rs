@@ -56,11 +56,11 @@ pub fn status(home: Option<&str>, json: bool) -> Result<()> {
     }
 
     let width = sites.iter().map(|s| s.name.len()).max().unwrap_or(4).max(4);
-    println!("{:<width$}  {:<12}  {}", "SITE", "NODE", "PINNED IN", width = width);
+    println!("{:<width$}  {:<12}  PINNED IN", "SITE", "NODE", width = width);
     for s in &sites {
         match node::read_pin(Path::new(&s.path)) {
             Some(pin) => println!("{:<width$}  {:<12}  {}", s.name, pin.version, pin.source.as_str(), width = width),
-            None => println!("{:<width$}  {:<12}  {}", s.name, "—", "(unpinned)", width = width),
+            None => println!("{:<width$}  {:<12}  (unpinned)", s.name, "—", width = width),
         }
     }
     println!("\nPin one with `dpl node use <version> <site>`, or `dpl node detect <site>` from package.json.");

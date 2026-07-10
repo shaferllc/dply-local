@@ -16,16 +16,15 @@ const FCGI_END_REQUEST: u8 = 3;
 const FCGI_PARAMS: u8 = 4;
 const FCGI_STDIN: u8 = 5;
 const FCGI_STDOUT: u8 = 6;
-const FCGI_STDERR: u8 = 7;
 const FCGI_RESPONDER: u8 = 1;
 const REQUEST_ID: u16 = 1;
 
 /// The parsed CGI response from php-fpm.
 pub struct FcgiResponse {
-    /// `stdout` split into raw header block + body happens in the proxy; here
-    /// we return the concatenated STDOUT stream and STDERR separately.
+    /// The concatenated STDOUT stream. The proxy splits it into the raw header
+    /// block + body. (FastCGI STDERR is read off the socket but discarded — it's
+    /// unused today.)
     pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
 }
 
 /// Execute one responder request against a php-fpm listening at `addr`.
@@ -60,7 +59,6 @@ pub async fn request(
 
     // Read records until END_REQUEST.
     let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
     loop {
         let mut header = [0u8; 8];
         stream
@@ -82,13 +80,13 @@ pub async fn request(
 
         match rtype {
             FCGI_STDOUT => stdout.extend_from_slice(&content),
-            FCGI_STDERR => stderr.extend_from_slice(&content),
             FCGI_END_REQUEST => break,
+            // FCGI_STDERR and anything else: consumed above, discarded.
             _ => {}
         }
     }
 
-    Ok(FcgiResponse { stdout, stderr })
+    Ok(FcgiResponse { stdout })
 }
 
 /// Write one FastCGI record with the given type and content (<= 64KB).

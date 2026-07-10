@@ -47,10 +47,6 @@ impl FpmManager {
         FpmManager { masters: BTreeMap::new(), xdebug_settings: xdebug::Settings::default() }
     }
 
-    pub fn count(&self) -> usize {
-        self.masters.len()
-    }
-
     /// Update the IDE-side Xdebug settings. Returns true when they changed, so
     /// the caller knows the running masters hold a stale loader ini and must be
     /// restarted for a new port or IDE key to take effect.

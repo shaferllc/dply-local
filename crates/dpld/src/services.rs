@@ -106,10 +106,6 @@ impl Services {
         self.config.save(&self.config_path).context("saving services.toml")
     }
 
-    pub fn running_count(&self) -> usize {
-        self.running.len()
-    }
-
     /// Installed engine versions we can create instances from.
     pub fn available_versions(&self, engine: Option<&str>) -> Vec<VersionInfo> {
         let engines: Vec<Engine> = match engine.and_then(Engine::from_name) {
@@ -476,7 +472,7 @@ fn spawn_server(engine: Engine, bin_dir: &Path, data: &Path, port: u16, name: &s
         }
     }
     cmd.stdout(std::process::Stdio::from(log))
-        .stderr(errlog.map(std::process::Stdio::from).unwrap_or_else(|| std::process::Stdio::null()))
+        .stderr(errlog.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null))
         .kill_on_drop(true);
     cmd.spawn().with_context(|| format!("spawning {}", server.display()))
 }

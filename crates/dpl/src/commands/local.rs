@@ -113,12 +113,6 @@ pub fn open(home: Option<&str>, name: Option<String>) -> Result<()> {
     open_in_browser(&url)
 }
 
-/// List installed PHP versions (no daemon needed). Marks the current default
-/// (the config's `default_php`, else the `php` on PATH) — used by the menu bar.
-pub fn php_list(json: bool) -> Result<()> {
-    php_list_home(None, json)
-}
-
 pub fn php_list_home(home: Option<&str>, json: bool) -> Result<()> {
     let versions = dpl_core::php::detect();
     let default_version = current_default_php(home, &versions);
@@ -716,7 +710,7 @@ pub fn services(home: Option<&str>, json: bool) -> Result<()> {
                 println!("No services. Create one: `dpl service create mypg --engine postgres`.");
                 return Ok(());
             }
-            println!("{:<14}  {:<9}  {:<8}  {:<6}  {}", "NAME", "ENGINE", "VERSION", "PORT", "STATE");
+            println!("{:<14}  {:<9}  {:<8}  {:<6}  STATE", "NAME", "ENGINE", "VERSION", "PORT");
             for s in &services {
                 let state = if s.external { "running (external)" }
                     else if s.running { "running" } else { "stopped" };

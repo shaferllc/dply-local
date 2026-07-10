@@ -18,8 +18,6 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 pub struct LocalCa {
     cert: rcgen::Certificate,
     key: KeyPair,
-    /// Path to the public CA cert users trust.
-    pub pem_path: PathBuf,
 }
 
 impl LocalCa {
@@ -37,7 +35,7 @@ impl LocalCa {
             // leaf signed by it validates against the trusted ca.pem because
             // the subject DN and public key match.
             let cert = ca_params()?.self_signed(&key).context("rebuilding CA cert")?;
-            return Ok(LocalCa { cert, key, pem_path });
+            return Ok(LocalCa { cert, key });
         }
 
         let key = KeyPair::generate().context("generating CA key")?;
@@ -45,7 +43,7 @@ impl LocalCa {
         write_private(&key_path, &key.serialize_pem())?;
         std::fs::write(&pem_path, cert.pem()).with_context(|| format!("writing {}", pem_path.display()))?;
         tracing::info!(ca = %pem_path.display(), "generated local CA");
-        Ok(LocalCa { cert, key, pem_path })
+        Ok(LocalCa { cert, key })
     }
 
     /// Mint a leaf certificate for `host`, signed by the CA.

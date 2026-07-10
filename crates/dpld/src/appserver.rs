@@ -33,11 +33,6 @@ impl AppServers {
         AppServers { servers: BTreeMap::new() }
     }
 
-    /// The loopback port a site's Octane server is listening on, if running.
-    pub fn port_for(&self, site: &str) -> Option<u16> {
-        self.servers.get(site).map(|s| s.port)
-    }
-
     /// Ensure an Octane server is running for `site`. Returns the port to proxy
     /// to, or `None` if it couldn't start (e.g. Octane isn't installed in the
     /// project — the site then falls back to php-fpm).

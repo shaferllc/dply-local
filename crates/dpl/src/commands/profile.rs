@@ -38,7 +38,7 @@ pub fn status(home: Option<&str>, json: bool) -> Result<()> {
     }
 
     let width = sites.iter().map(|s| s.name.len()).max().unwrap_or(4).max(4);
-    println!("{:<width$}  {:<8}  {:<9}  {}", "SITE", "PHP", "PROFILER", "", width = width);
+    println!("{:<width$}  {:<8}  {:<9}  ", "SITE", "PHP", "PROFILER", width = width);
     for s in &sites {
         let state = if s.profile { "on" } else { "off" };
         let note = if s.profile && !s.profile_installed { "SPX not installed for this PHP" } else { "" };
