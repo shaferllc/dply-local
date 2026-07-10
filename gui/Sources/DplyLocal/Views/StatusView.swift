@@ -74,14 +74,14 @@ struct StatusView: View {
 
                 DetailSection(title: "Clean .test on :80 + trusted HTTPS") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("One-time privileged setup: routes .test, redirects :80/:443, and trusts the local CA so sites are at http://name.test (no port) with a padlock.")
+                        Text("One-time privileged setup: routes .test, hands :80/:443 to the daemon, and trusts the local CA so sites are at http://name.test (no port) with a padlock.")
                             .font(.caption).foregroundStyle(.secondary)
                         Button {
-                            store.runSetupInTerminal()
+                            Task { await store.runSetup() }
                         } label: {
-                            Label("Run setup in Terminal…", systemImage: "lock.shield")
+                            Label("Run setup…", systemImage: "lock.shield")
                         }
-                        .help("Opens Terminal to run `sudo dpl setup` (needs your password)")
+                        .help("macOS will ask for your password")
                     }
                 }
 

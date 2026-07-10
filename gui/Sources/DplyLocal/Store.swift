@@ -1470,9 +1470,11 @@ final class Store: ObservableObject {
         doctorHealth = await doctorReport()
     }
 
-    /// Apply a check's fix. `sudo` commands (and anything that isn't `dpl`, like
-    /// `brew install`) go to Terminal so the user sees the prompt and progress;
-    /// plain `dpl` commands run headless and refresh in place.
+    /// Apply a check's fix.
+    ///
+    /// `sudo` fixes run behind the system authorization sheet, in the app. Fixes
+    /// that aren't `dpl` at all (`brew install …`) still go to Terminal, where the
+    /// user can watch a long, chatty command and answer its questions.
     func runFix(_ fix: DoctorFix) async {
         let parts = fix.command.split(separator: " ").map(String.init)
         guard !parts.isEmpty else { return }
@@ -1485,18 +1487,48 @@ final class Store: ObservableObject {
             return
         }
 
-        if fix.sudo || parts[0] != "dpl" {
+        if fix.sudo {
+            await runPrivilegedFix(parts)
+            return
+        }
+        if parts[0] != "dpl" {
             guard let dpl = try? cli.resolveBinary() else { return }
-            // Expand the bare `dpl` token to the binary this GUI actually drives.
-            let command = parts
-                .map { $0 == "dpl" ? dpl : $0 }
-                .joined(separator: " ")
+            let command = parts.map { $0 == "dpl" ? dpl : $0 }.joined(separator: " ")
             runInTerminal(command)
             return
         }
         let cli = self.cli
         let args = Array(parts.dropFirst())
         _ = await background { try cli.runRaw(args) }
+        await refreshDoctor()
+    }
+
+    /// Run a `sudo …` doctor fix as root, via the authorization sheet.
+    ///
+    /// The command arrives as `sudo dpl setup`. We drop the `sudo` (the sheet is
+    /// what grants root), expand `dpl` to the binary this GUI drives, and — because
+    /// the sheet makes us root outright, with no `SUDO_USER` to fall back on — tell
+    /// `setup` which human it is configuring. Without that it would install the
+    /// daemon as root and write root-owned files into the user's `~/.dpl`.
+    private func runPrivilegedFix(_ parts: [String]) async {
+        guard let dpl = try? cli.resolveBinary() else { return }
+
+        var args = Array(parts.dropFirst())                     // drop "sudo"
+        args = args.map { $0 == "dpl" ? dpl : $0 }
+        if args.first == dpl, args.dropFirst().first == "setup" {
+            args += ["--as-user", NSUserName()]
+        }
+
+        let command = args.map(PrivilegedTask.shellQuote).joined(separator: " ")
+        do {
+            try PrivilegedTask.run(command)
+        } catch let failure as PrivilegedTask.Failure {
+            // Cancelling the sheet is a choice, not a failure to report.
+            if !failure.cancelled { lastError = failure.errorDescription }
+        } catch {
+            lastError = error.localizedDescription
+        }
+        await refreshDoctor()
     }
 
     /// Recent request-log text for a local site.
@@ -1641,14 +1673,31 @@ final class Store: ObservableObject {
     }
 
     /// Open Terminal to run the one-time privileged setup (needs sudo).
-    func runSetupInTerminal() {
-        guard let dpl = try? cli.resolveBinary() else { return }
-        let cmd = "sudo \(dpl) setup"
-        let script = "tell application \"Terminal\" to do script \"\(cmd)\"\ntell application \"Terminal\" to activate"
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        proc.arguments = ["-e", script]
-        try? proc.run()
+    /// Run `dpl setup` as root behind the system authorization sheet.
+    ///
+    /// Returns true when setup completed. Cancelling the sheet returns false and
+    /// reports nothing — the user said no, which is an answer, not an error.
+    ///
+    /// `--as-user` is not optional here: the sheet grants root with no `SUDO_USER`,
+    /// and `dpl setup` refuses to install a daemon that would run every site's PHP
+    /// as root.
+    @discardableResult
+    func runSetup() async -> Bool {
+        guard let dpl = try? cli.resolveBinary() else { return false }
+        let command = [dpl, "setup", "--as-user", NSUserName()]
+            .map(PrivilegedTask.shellQuote)
+            .joined(separator: " ")
+        do {
+            try PrivilegedTask.run(command)
+            await refreshDoctor()
+            return true
+        } catch let failure as PrivilegedTask.Failure {
+            if !failure.cancelled { lastError = failure.errorDescription }
+            return false
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
     }
 
     /// Run `dpl takeover` in Terminal — stops Valet/Apache and gives dpl :80/:443.

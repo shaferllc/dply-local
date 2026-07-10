@@ -113,7 +113,7 @@ struct MenuBarContent: View {
         Menu("First Aid & Services") {
             Button("Open ~/.dpl folder") { store.openDplFolder() }
             Button("Restart daemon") { Task { await store.restartDaemon() } }
-            Button("Run setup (trusted .test)…") { store.runSetupInTerminal() }
+            Button("Run setup (trusted .test)…") { Task { await store.runSetup() } }
         }
 
         Divider()

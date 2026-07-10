@@ -13,6 +13,7 @@ struct OnboardingView: View {
     @State private var reqs: [SetupRequirement] = []
     @State private var autostart = false
     @State private var didSetup = false
+    @State private var settingUp = false
     @State private var firstSite: String?
 
     private let last = 5
@@ -93,17 +94,27 @@ struct OnboardingView: View {
         stepShell(icon: "lock.shield", title: "Clean .test + trusted HTTPS",
                   subtitle: "One-time privileged setup (optional).") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("This routes the .test domain, redirects ports 80/443, and trusts a local certificate authority — so your sites load at **http://name.test** (no port) with a padlock.")
+                Text("This routes the .test domain, hands ports 80 and 443 to the dpl daemon, and trusts a local certificate authority — so your sites load at **http://name.test** (no port) with a padlock.")
                     .font(.callout)
                 Text("Skip it and your sites still work at http://name.test:8080.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button {
-                    store.runSetupInTerminal(); didSetup = true
+                    Task {
+                        settingUp = true
+                        didSetup = await store.runSetup()
+                        settingUp = false
+                    }
                 } label: {
-                    Label(didSetup ? "Setup launched in Terminal" : "Run Setup in Terminal…", systemImage: "terminal")
+                    if settingUp {
+                        Label("Setting up…", systemImage: "hourglass")
+                    } else {
+                        Label(didSetup ? "Setup complete" : "Run Setup…",
+                              systemImage: didSetup ? "checkmark.circle.fill" : "lock.shield")
+                    }
                 }
                 .buttonStyle(.borderedProminent).tint(Theme.violet)
-                Text("Opens Terminal for `sudo dpl setup` — enter your password there.")
+                .disabled(settingUp || didSetup)
+                Text("macOS will ask for your password. Nothing leaves this window.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
