@@ -12,10 +12,12 @@ per-run authorization sheet. With a real identity, setup can move to
 `SMAppService` — a resident privileged helper approved once in System Settings —
 instead of prompting on every `dpl setup`. **Blocks #2.**
 
-### 2. Self-updating app (Sparkle)
-The app checks GitHub Releases and updates in place. The release CI already
-builds the DMG on every tag; add an `appcast.xml` the workflow publishes, and wire
-Sparkle into the bundle. No more "download the new DMG" — it just updates.
+### 2. ✅ Self-updating app (Sparkle) — shipped
+Sparkle 2 checks `releases/latest/download/appcast.xml` daily and updates in
+place; CI signs every DMG with the project's EdDSA key and publishes the
+appcast as a release asset. Shipped *without* #1: EdDSA authenticates updates
+for the ad-hoc-signed app, so #1's remaining value is the first-install
+Gatekeeper experience (and SMAppService setup), not updates.
 
 ### 3. Bundled, pinned PHP runtimes
 Ship dply-built PHP binaries per version instead of resolving the user's Homebrew
