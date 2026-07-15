@@ -19,6 +19,16 @@ use dpl_core::xdebug::Mode;
 
 use crate::fpm::{FpmManager, MasterKey};
 
+/// A linked site's branch-aware-database configuration, as stored on its Link.
+#[derive(Clone)]
+pub struct BranchDbState {
+    pub path: PathBuf,
+    pub database: Option<String>,
+    pub db_branch: Option<String>,
+    /// Postgres port when not the default 5432.
+    pub port: Option<u16>,
+}
+
 /// Everything the proxy needs to serve one request for a site.
 pub struct SiteRoute {
     pub docroot: PathBuf,
@@ -436,6 +446,7 @@ impl Registry {
                 preload: None,
                 database: None,
                 db_branch: None,
+                db_port: None,
             },
         );
         self.save()?;
@@ -471,7 +482,7 @@ impl Registry {
             let Ok(path) = canonicalize(path) else { continue };
             self.config.links.insert(
                 name.to_lowercase(),
-                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None, profile: false, preload: None, database: None, db_branch: None },
+                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None, profile: false, preload: None, database: None, db_branch: None, db_port: None },
             );
             linked_ok += 1;
         }
@@ -828,22 +839,50 @@ impl Registry {
         }
     }
 
-    /// A linked site's branch-DB state: (project path, base database, live branch).
-    /// The database/branch are None until `dpl db attach`.
-    pub fn branch_db_state(&self, site: &str) -> Result<(PathBuf, Option<String>, Option<String>)> {
+    /// A linked site's branch-DB state. `database`/`db_branch` are None until
+    /// `dpl db attach`.
+    pub fn branch_db_state(&self, site: &str) -> Result<BranchDbState> {
         let site = site.to_lowercase();
         let link = self
             .config
             .links
             .get(&site)
             .with_context(|| format!("{site} is not linked (branch databases apply to linked sites)"))?;
-        Ok((link.path.clone(), link.database.clone(), link.db_branch.clone()))
+        Ok(BranchDbState {
+            path: link.path.clone(),
+            database: link.database.clone(),
+            db_branch: link.db_branch.clone(),
+            port: link.db_port,
+        })
     }
 
-    /// Persist a site's branch-DB config: the base database name and the branch
-    /// currently live in it. `None`/`None` detaches. No reconcile — the database
+    /// Every attached site, for the auto-switch watcher: (site, state).
+    pub fn attached_branch_dbs(&self) -> Vec<(String, BranchDbState)> {
+        self.config
+            .links
+            .iter()
+            .filter(|(_, l)| l.database.is_some())
+            .map(|(name, l)| {
+                (name.clone(), BranchDbState {
+                    path: l.path.clone(),
+                    database: l.database.clone(),
+                    db_branch: l.db_branch.clone(),
+                    port: l.db_port,
+                })
+            })
+            .collect()
+    }
+
+    /// Persist a site's branch-DB config: base database, instance port, and the
+    /// branch currently live. All-None detaches. No reconcile — the database
     /// mapping doesn't affect how the site is served.
-    pub fn set_branch_db(&mut self, site: &str, database: Option<String>, branch: Option<String>) -> Result<()> {
+    pub fn set_branch_db(
+        &mut self,
+        site: &str,
+        database: Option<String>,
+        port: Option<u16>,
+        branch: Option<String>,
+    ) -> Result<()> {
         let site = site.to_lowercase();
         let link = self
             .config
@@ -852,6 +891,7 @@ impl Registry {
             .with_context(|| format!("{site} is not linked"))?;
         link.database = database;
         link.db_branch = branch;
+        link.db_port = port;
         self.save()
     }
 

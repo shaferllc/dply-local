@@ -166,6 +166,10 @@ pub struct Link {
     /// daemon on every switch; meaningless when `database` is None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db_branch: Option<String>,
+    /// Postgres port the branch databases live on, when not the default 5432.
+    /// Recorded at attach so the auto-switch watcher targets the right instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_port: Option<u16>,
 }
 
 impl LocalConfig {

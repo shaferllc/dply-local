@@ -7,6 +7,7 @@
 
 mod access;
 mod appserver;
+mod branchdb;
 mod ca;
 mod dns;
 mod dumps;
@@ -131,6 +132,13 @@ fn main() -> anyhow::Result<()> {
             services,
             http_port,
         };
+
+        // Auto-switch branch databases when an attached site's git HEAD moves.
+        let branchdb_task = {
+            let state = state.clone();
+            tokio::spawn(async move { branchdb::watch(state).await })
+        };
+
         let result = server::run(state).await;
 
         proxy_task.abort();
@@ -138,6 +146,7 @@ fn main() -> anyhow::Result<()> {
         dns_task.abort();
         mail_task.abort();
         dumps_task.abort();
+        branchdb_task.abort();
         result
     })
 }
