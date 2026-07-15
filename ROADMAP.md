@@ -50,25 +50,27 @@ A per-repo file capturing PHP/Node versions, extensions, services, and Xdebug so
 teammate runs one `dpl up` and gets an identical environment. Turns "works on my
 machine" setup into a checked-in artifact; complements the existing `dpl parity`.
 
-### 8. Per-branch database snapshots
-One command to dump/restore a site's databases, tied to the current git branch, so
-switching branches switches data. Removes the "migrate down / reseed" dance when
-hopping between feature branches.
+### 8. ✅ Per-branch databases — shipped in 0.4.0, beyond the original spec
+Landed as *branch-aware databases* (`dpl db attach`): instead of dump/restore on
+demand, the base database follows `git checkout` automatically — a daemon watcher
+swaps branch data via catalog renames (~90ms), cloning only on a branch's first
+visit. Postgres-only for now; MySQL (dump/restore path) and parked-DB GC for
+deleted branches remain as follow-ups.
 
 ## Performance
 
-### 9. Cold-start elimination: opcache preload + pool warming
-First-request latency was 1–1.8s in testing (fresh php-fpm master, cold opcache) vs
-~100–200ms warm. Enable `opcache.preload` per site and pre-warm one worker on
-reconcile so the first hit after a restart is fast. Target sub-100ms cold serve.
+### 9. ✅ Cold-start elimination — shipped in 0.3.0
+`dpl preload` (per-site `opcache.preload` on a dedicated master) plus the warm-up
+FastCGI hit on reconcile.
 
-### 10. Push-based tailing + incremental reconcile
-Two idle-cost wins at scale (100+ sites):
-- Replace the System panel's 1.5s log poll with a `DispatchSource` file watcher —
-  instant updates, zero CPU when idle.
-- Make the daemon's reconcile incremental: touch only changed sites instead of
-  rebuilding every route on each config change. Also worth: a pooled/persistent
-  FastCGI connection to php-fpm instead of one socket per request.
+### 10. Push-based tailing + incremental reconcile — first half shipped in 0.3.0
+- ~~Replace the System panel's 1.5s log poll with a `DispatchSource` file
+  watcher~~ — shipped (event-driven tailing).
+- Still open: make the daemon's reconcile incremental — touch only changed sites
+  instead of rebuilding every route on each config change. Also worth: a
+  pooled/persistent FastCGI connection to php-fpm instead of one socket per
+  request. (0.4.0 also cached per-site repo metadata across reconciles, so the
+  `dpl sites` read path no longer crawls the filesystem.)
 
 ---
 
