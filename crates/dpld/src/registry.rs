@@ -45,6 +45,19 @@ struct RouteInfo {
     upstream: Option<u16>,
 }
 
+/// Repo-derived facts about a site — its framework label, required-PHP
+/// constraint, and Node pin — cached at reconcile time. Reading these means
+/// touching the project's `composer.json` (twice, historically) and up to three
+/// node files; `site_infos()` behind the `dpl sites` the GUI polls constantly
+/// did that for every site on every call. Refreshed once per reconcile, exactly
+/// like `xdebug_installed`/`spx_installed`.
+#[derive(Default, Clone)]
+struct SiteMeta {
+    framework: Option<String>,
+    requires_php: Option<String>,
+    node: Option<dpl_core::node::Pin>,
+}
+
 pub struct Registry {
     config: LocalConfig,
     config_path: PathBuf,
@@ -59,6 +72,9 @@ pub struct Registry {
     xdebug_installed: BTreeMap<PathBuf, bool>,
     /// Whether SPX is installed, per PHP binary. Cached for the same reason.
     spx_installed: BTreeMap<PathBuf, bool>,
+    /// Per-site repo metadata (framework / required PHP / node pin), keyed by
+    /// site name. Populated by [`Registry::reconcile`]; read by [`Registry::site_infos`].
+    site_meta: BTreeMap<String, SiteMeta>,
 }
 
 impl Registry {
@@ -75,6 +91,7 @@ impl Registry {
             tlds,
             xdebug_installed: BTreeMap::new(),
             spx_installed: BTreeMap::new(),
+            site_meta: BTreeMap::new(),
         })
     }
 
@@ -155,8 +172,20 @@ impl Registry {
                     .get(&s.name)
                     .map(|r| (self.xdebug_installed(&r.php_bin), self.spx_installed(&r.php_bin)))
                     .unwrap_or((false, false));
-                // Node pin is a repo file, cheap to read here (like framework detection).
-                let node_pin = dpl_core::node::read_pin(&s.path);
+                // Framework, required-PHP, and the node pin are cached per
+                // reconcile (see `site_meta`) so this read-only path never
+                // touches composer.json or the node files. A site that appeared
+                // since the last reconcile (not yet cached) falls back to
+                // reading them directly — correct, just not yet cheap.
+                let meta = self.site_meta.get(&s.name);
+                let (framework, requires_php) = match meta {
+                    Some(m) => (m.framework.clone(), m.requires_php.clone()),
+                    None => sites::detect_meta(&s.path),
+                };
+                let node_pin = match meta {
+                    Some(m) => m.node.clone(),
+                    None => dpl_core::node::read_pin(&s.path),
+                };
                 // Show the preload script as configured (relative to the project).
                 let preload = self
                     .config
@@ -175,8 +204,8 @@ impl Registry {
                     secure: s.secure,
                     serving,
                     runtime: s.runtime,
-                    framework: sites::detect_framework(&s.path),
-                    requires_php: sites::detect_required_php(&s.path),
+                    framework,
+                    requires_php,
                     xdebug: Some(s.xdebug.to_string()),
                     xdebug_installed,
                     profile: s.profile,
@@ -216,6 +245,24 @@ impl Registry {
         }
         infos.sort_by(|a, b| a.name.cmp(&b.name));
         infos
+    }
+
+    /// Number of currently-servable sites, counted straight from the routing
+    /// table — the cheap equivalent of `site_infos().filter(|s| s.serving).count()`
+    /// that `Request::Status` used to pay for, without building every `SiteInfo`
+    /// (which reads each project's composer.json and node files). Counts live
+    /// fpm/Octane routes plus the always-on reverse proxies, matching how
+    /// `site_infos()` marks `serving`.
+    pub fn serving_count(&self) -> usize {
+        let routes = self
+            .routes
+            .values()
+            .filter(|r| {
+                r.upstream.is_some()
+                    || self.fpm.addr_for(&r.php_bin, &r.xdebug, r.profile, r.preload.as_deref()).is_some()
+            })
+            .count();
+        routes + self.config.proxies.len()
     }
 
     /// Start php-fpm masters for every PHP version in use, stop unused ones,
@@ -264,6 +311,19 @@ impl Registry {
             distinct_bins.iter().map(|b| ((*b).clone(), dpl_core::xdebug::installed(b))).collect();
         self.spx_installed =
             distinct_bins.iter().map(|b| ((*b).clone(), dpl_core::spx::installed(b))).collect();
+
+        // Cache each site's repo metadata (framework / required PHP / node pin)
+        // so the read-only `site_infos()` never re-reads composer.json or the
+        // node files on the hot `dpl sites` path. Same rationale as the caches
+        // above; refreshed here on every mutation.
+        self.site_meta = resolved
+            .iter()
+            .map(|s| {
+                let (framework, requires_php) = sites::detect_meta(&s.path);
+                let node = dpl_core::node::read_pin(&s.path);
+                (s.name.clone(), SiteMeta { framework, requires_php, node })
+            })
+            .collect();
 
         // Start/stop Octane servers for sites on a non-fpm runtime, and record
         // each one's upstream port.

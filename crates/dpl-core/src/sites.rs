@@ -18,44 +18,73 @@ use crate::config::LocalConfig;
 /// files) — e.g. `Laravel (^12)`, `Symfony`, `WordPress`, `Drupal`. Returns a
 /// display string, or `None` if it doesn't look like a PHP project.
 pub fn detect_framework(project: &Path) -> Option<String> {
-    let composer = project.join("composer.json");
-    if let Ok(text) = std::fs::read_to_string(&composer) {
-        // Lightweight, dependency-free scan: find `"pkg"` then the quoted value
-        // after the following colon (its version constraint).
-        let ver = |pkg: &str| -> Option<String> {
-            let key = format!("\"{pkg}\"");
-            let after = &text[text.find(&key)? + key.len()..];
-            let rest = &after[after.find(':')? + 1..];
-            let q1 = rest.find('"')?;
-            let q2 = rest[q1 + 1..].find('"')?;
-            Some(rest[q1 + 1..=q1 + q2].to_string())
-        };
-        if let Some(v) = ver("laravel/framework") {
-            return Some(format!("Laravel ({v})"));
-        }
-        if let Some(v) = ver("symfony/framework-bundle").or_else(|| ver("symfony/symfony")) {
-            return Some(format!("Symfony ({v})"));
-        }
-        if let Some(v) = ver("tempest/framework") {
-            return Some(format!("Tempest ({v})"));
-        }
-        if ver("statamic/cms").is_some() {
-            return Some("Statamic".into());
-        }
-        if ver("craftcms/cms").is_some() {
-            return Some("Craft".into());
-        }
-        if ver("drupal/core").is_some() || ver("drupal/core-recommended").is_some() {
-            return Some("Drupal".into());
-        }
-        if ver("slim/slim").is_some() {
-            return Some("Slim".into());
-        }
-        if ver("cakephp/cakephp").is_some() {
-            return Some("CakePHP".into());
-        }
-        return Some("PHP (Composer)".into());
+    match std::fs::read_to_string(project.join("composer.json")) {
+        Ok(text) => framework_from_composer(&text),
+        Err(_) => framework_without_composer(project),
     }
+}
+
+/// The PHP version constraint a project requires (composer.json `require.php`,
+/// e.g. `"^8.3"`) — used to flag PHP compatibility / suggest per-site isolation.
+pub fn detect_required_php(project: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(project.join("composer.json")).ok()?;
+    required_php_from_composer(&text)
+}
+
+/// Framework label **and** required-PHP constraint from a single read of
+/// `composer.json` (the framework still falls back to well-known files when
+/// there is no composer.json). `detect_framework` + `detect_required_php` read
+/// the same file twice; the daemon's hot `dpl sites` path uses this instead so
+/// each project's composer.json is read once per reconcile, not twice per call.
+pub fn detect_meta(project: &Path) -> (Option<String>, Option<String>) {
+    match std::fs::read_to_string(project.join("composer.json")) {
+        Ok(text) => (framework_from_composer(&text), required_php_from_composer(&text)),
+        Err(_) => (framework_without_composer(project), None),
+    }
+}
+
+/// Parse a framework label out of already-read `composer.json` text. A composer
+/// project with no framework we recognise is still `PHP (Composer)`.
+fn framework_from_composer(text: &str) -> Option<String> {
+    // Lightweight, dependency-free scan: find `"pkg"` then the quoted value
+    // after the following colon (its version constraint).
+    let ver = |pkg: &str| -> Option<String> {
+        let key = format!("\"{pkg}\"");
+        let after = &text[text.find(&key)? + key.len()..];
+        let rest = &after[after.find(':')? + 1..];
+        let q1 = rest.find('"')?;
+        let q2 = rest[q1 + 1..].find('"')?;
+        Some(rest[q1 + 1..=q1 + q2].to_string())
+    };
+    if let Some(v) = ver("laravel/framework") {
+        return Some(format!("Laravel ({v})"));
+    }
+    if let Some(v) = ver("symfony/framework-bundle").or_else(|| ver("symfony/symfony")) {
+        return Some(format!("Symfony ({v})"));
+    }
+    if let Some(v) = ver("tempest/framework") {
+        return Some(format!("Tempest ({v})"));
+    }
+    if ver("statamic/cms").is_some() {
+        return Some("Statamic".into());
+    }
+    if ver("craftcms/cms").is_some() {
+        return Some("Craft".into());
+    }
+    if ver("drupal/core").is_some() || ver("drupal/core-recommended").is_some() {
+        return Some("Drupal".into());
+    }
+    if ver("slim/slim").is_some() {
+        return Some("Slim".into());
+    }
+    if ver("cakephp/cakephp").is_some() {
+        return Some("CakePHP".into());
+    }
+    Some("PHP (Composer)".into())
+}
+
+/// Framework detection for a project without a readable `composer.json`.
+fn framework_without_composer(project: &Path) -> Option<String> {
     if project.join("wp-config.php").is_file() || project.join("wp-load.php").is_file() {
         return Some("WordPress".into());
     }
@@ -65,10 +94,8 @@ pub fn detect_framework(project: &Path) -> Option<String> {
     None
 }
 
-/// The PHP version constraint a project requires (composer.json `require.php`,
-/// e.g. `"^8.3"`) — used to flag PHP compatibility / suggest per-site isolation.
-pub fn detect_required_php(project: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(project.join("composer.json")).ok()?;
+/// Parse the `require.php` constraint out of already-read `composer.json` text.
+fn required_php_from_composer(text: &str) -> Option<String> {
     // Find the `require` block, then the `php` constraint within it.
     let after = &text[text.find("\"require\"")?..];
     let rest = &after[after.find("\"php\"")? + 5..];
@@ -221,4 +248,77 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
 
     sites.sort_by(|a, b| a.name.cmp(&b.name));
     sites
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a composer.json into a fresh temp project dir and return the dir.
+    fn project_with_composer(body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("dpl-sites-test-{}", uniq()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("composer.json"), body).unwrap();
+        dir
+    }
+
+    // No Date/rand in tests either; a process-unique counter is enough.
+    fn uniq() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        std::process::id() as u64 * 1_000_000 + N.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[test]
+    fn detects_laravel_with_version() {
+        let dir = project_with_composer(
+            r#"{"require":{"php":"^8.3","laravel/framework":"^11.0"}}"#,
+        );
+        assert_eq!(detect_framework(&dir), Some("Laravel (^11.0)".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn composer_without_known_framework_is_php_composer() {
+        let dir = project_with_composer(r#"{"require":{"php":">=8.1"}}"#);
+        assert_eq!(detect_framework(&dir), Some("PHP (Composer)".into()));
+        assert_eq!(detect_required_php(&dir), Some(">=8.1".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn required_php_absent_is_none() {
+        let dir = project_with_composer(r#"{"require":{"laravel/framework":"^11.0"}}"#);
+        assert_eq!(detect_required_php(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_composer_falls_back_to_well_known_files() {
+        let dir = std::env::temp_dir().join(format!("dpl-sites-test-{}", uniq()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wp-config.php"), "<?php").unwrap();
+        assert_eq!(detect_framework(&dir), Some("WordPress".into()));
+        assert_eq!(detect_required_php(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The single-read `detect_meta` must agree with the two separate readers it
+    /// replaces on the hot path — this is the invariant the caching relies on.
+    #[test]
+    fn detect_meta_matches_the_two_separate_readers() {
+        let cases = [
+            r#"{"require":{"php":"^8.2","laravel/framework":"^12.0"}}"#,
+            r#"{"require":{"symfony/framework-bundle":"^7.0"}}"#,
+            r#"{"require":{"php":"~8.1"}}"#,
+            r#"{}"#,
+        ];
+        for body in cases {
+            let dir = project_with_composer(body);
+            let (fw, php) = detect_meta(&dir);
+            assert_eq!(fw, detect_framework(&dir), "framework mismatch for {body}");
+            assert_eq!(php, detect_required_php(&dir), "required_php mismatch for {body}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }

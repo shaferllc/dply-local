@@ -134,7 +134,7 @@ async fn dispatch(
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     uptime_secs: state.started.elapsed().as_secs(),
                     proxy_running: true,
-                    site_count: reg.site_infos().iter().filter(|s| s.serving).count(),
+                    site_count: reg.serving_count(),
                 },
             }
         }
