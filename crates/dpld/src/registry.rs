@@ -85,6 +85,11 @@ pub struct Registry {
     /// Per-site repo metadata (framework / required PHP / node pin), keyed by
     /// site name. Populated by [`Registry::reconcile`]; read by [`Registry::site_infos`].
     site_meta: BTreeMap<String, SiteMeta>,
+    /// Installed PHP versions + the default binary, detected once per full
+    /// reconcile (each detect spawns a process per version). The incremental
+    /// path reads these instead of re-probing the machine on every mutation.
+    php_versions: Vec<dpl_core::php::PhpVersion>,
+    default_php_bin: PathBuf,
 }
 
 impl Registry {
@@ -102,6 +107,8 @@ impl Registry {
             xdebug_installed: BTreeMap::new(),
             spx_installed: BTreeMap::new(),
             site_meta: BTreeMap::new(),
+            php_versions: Vec::new(),
+            default_php_bin: PathBuf::new(),
         })
     }
 
@@ -288,9 +295,12 @@ impl Registry {
 
         // Detect PHP ONCE per reconcile — `php::detect()` spawns a process per
         // installed version, so resolving it per-site (previously twice each)
-        // made every mutation take tens of seconds. Cache it here.
+        // made every mutation take tens of seconds. Cached on self so the
+        // incremental path (`reconcile_site`) never re-probes at all.
         let versions = dpl_core::php::detect();
         let default_bin = dpl_core::php::default_binary();
+        self.php_versions = versions.clone();
+        self.default_php_bin = default_bin.clone();
         let bin_for = |site: &ResolvedSite| -> PathBuf {
             match &site.php {
                 Some(v) => versions
@@ -384,6 +394,98 @@ impl Registry {
             .count()
     }
 
+    /// Reconcile ONE site — the fast path for single-site mutations (secure,
+    /// PHP pin, runtime, Xdebug mode, profiler, preload, link/unlink).
+    ///
+    /// A full [`Registry::reconcile`] re-detects PHP (a process spawn per
+    /// installed version) and re-reads every site's repo metadata; at 100+
+    /// sites that made each mutation pay for the whole machine. This touches
+    /// only the named site and derives the keep-alive sets for php-fpm masters
+    /// and Octane servers from the in-memory routing table, so unused backends
+    /// are still stopped without resolving anybody else.
+    pub fn reconcile_site(&mut self, name: &str) {
+        let name = name.to_lowercase();
+        match sites::resolve_one(&self.config, &name) {
+            Some(site) => {
+                // Binary from the cached detection; a pin to a version that
+                // appeared since the last full reconcile triggers ONE refresh.
+                let mut bin = self.cached_bin_for(&site);
+                if bin.is_none() {
+                    self.php_versions = dpl_core::php::detect();
+                    bin = self.cached_bin_for(&site);
+                }
+                let bin = bin.unwrap_or_else(|| self.default_php_bin.clone());
+
+                // Extension caches for a binary we haven't met yet.
+                if !self.xdebug_installed.contains_key(&bin) {
+                    self.xdebug_installed.insert(bin.clone(), dpl_core::xdebug::installed(&bin));
+                    self.spx_installed.insert(bin.clone(), dpl_core::spx::installed(&bin));
+                }
+
+                let _ = self.fpm.ensure(&bin, &site.xdebug, site.profile, site.preload.as_deref());
+
+                // Octane runtime for this site, if any.
+                let runtime = site.runtime.as_deref().unwrap_or("fpm");
+                let upstream = if runtime != "fpm" && !runtime.is_empty() {
+                    self.appservers.ensure(&site.name, runtime, &site.path, &bin)
+                } else {
+                    None
+                };
+
+                self.site_meta.insert(name.clone(), {
+                    let (framework, requires_php) = sites::detect_meta(&site.path);
+                    SiteMeta { framework, requires_php, node: dpl_core::node::read_pin(&site.path) }
+                });
+                self.routes.insert(
+                    name,
+                    RouteInfo {
+                        docroot: site.docroot,
+                        php_bin: bin,
+                        xdebug: site.xdebug,
+                        profile: site.profile,
+                        preload: site.preload,
+                        secure: site.secure,
+                        upstream,
+                    },
+                );
+            }
+            None => {
+                self.routes.remove(&name);
+                self.site_meta.remove(&name);
+            }
+        }
+
+        // Keep-alive sets straight from the routing table — no disk, no spawns.
+        let needed: BTreeSet<MasterKey> = self
+            .routes
+            .values()
+            .map(|r| (r.php_bin.clone(), r.xdebug.clone(), r.profile, r.preload.clone()))
+            .collect();
+        self.fpm.retain(&needed);
+        let octane: BTreeSet<String> = self
+            .routes
+            .iter()
+            .filter(|(_, r)| r.upstream.is_some())
+            .map(|(n, _)| n.clone())
+            .collect();
+        self.appservers.retain(&octane);
+
+        // Keep /etc/hosts current in hosts mode — the site set may have changed.
+        if self.config.uses_hosts() {
+            let resolved = sites::resolve(&self.config);
+            self.sync_hosts_file(&resolved);
+        }
+    }
+
+    /// The cached binary for a site's (possibly pinned) PHP. `None` = pinned
+    /// to a version the cache doesn't know (caller refreshes once).
+    fn cached_bin_for(&self, site: &ResolvedSite) -> Option<PathBuf> {
+        match &site.php {
+            Some(v) => self.php_versions.iter().find(|p| &p.version == v).map(|p| p.binary.clone()),
+            None => Some(self.default_php_bin.clone()),
+        }
+    }
+
     /// Rewrite the dpl-managed block of `/etc/hosts` (via the privileged helper,
     /// which a NOPASSWD sudoers rule lets us run silently) to list every site on
     /// every configured TLD. Best-effort: if the helper or sudoers rule is
@@ -455,7 +557,7 @@ impl Registry {
             },
         );
         self.save()?;
-        self.reconcile();
+        self.reconcile_site(&name);
         Ok(format!("Linked {} → {}.test", path.display(), name))
     }
 
@@ -465,7 +567,7 @@ impl Registry {
             return Ok(format!("No linked site named {name}."));
         }
         self.save()?;
-        self.reconcile();
+        self.reconcile_site(&name);
         Ok(format!("Unlinked {name}."))
     }
 
@@ -538,8 +640,8 @@ impl Registry {
             .with_context(|| format!("no linked site named `{site}` (runtimes apply to linked sites)"))?;
         link.runtime = if runtime == "fpm" { None } else { Some(runtime.clone()) };
         self.save()?;
-        let n = self.reconcile();
-        Ok(format!("`{site}` now runs on {runtime}. Serving {n} site(s)."))
+        self.reconcile_site(&site);
+        Ok(format!("`{site}` now runs on {runtime}. Serving {} site(s).", self.serving_count()))
     }
 
     /// Set the Xdebug mode for one linked site, or the default for all sites
@@ -621,8 +723,15 @@ impl Registry {
             return Ok("Nothing to change.".into());
         }
         self.save()?;
-        let n = self.reconcile();
-        messages.push(format!("Serving {n} site(s)."));
+        // A mode change for one site moves one pool; the shared IDE settings
+        // (port / key) touch every master, so those still take the full pass.
+        match (&site, port, ide_key) {
+            (Some(name), None, None) => self.reconcile_site(name),
+            _ => {
+                self.reconcile();
+            }
+        }
+        messages.push(format!("Serving {} site(s).", self.serving_count()));
         Ok(messages.join(" "))
     }
 
@@ -690,7 +799,7 @@ impl Registry {
                     .with_context(|| format!("{name} is not linked (php pinning applies to linked sites)"))?;
                 link.php = Some(version.to_string());
                 self.save()?;
-                self.reconcile();
+                self.reconcile_site(&name);
                 Ok(format!("{name}.test now uses PHP {version}."))
             }
             None => {
@@ -793,7 +902,7 @@ impl Registry {
             Some(link) => {
                 link.profile = on;
                 self.save()?;
-                self.reconcile();
+                self.reconcile_site(&name);
                 if on {
                     Ok(format!(
                         "Profiler on for {name}.test — every request is now captured. \
@@ -828,7 +937,7 @@ impl Registry {
                 }
                 link.preload = Some(rel.clone().into());
                 self.save()?;
-                self.reconcile();
+                self.reconcile_site(&name);
                 Ok(format!(
                     "Preload on for {name}.test using {rel} — its own php-fpm master will \
                      compile it into opcache at startup. Preloaded code is frozen until the \
@@ -838,7 +947,7 @@ impl Registry {
             None => {
                 link.preload = None;
                 self.save()?;
-                self.reconcile();
+                self.reconcile_site(&name);
                 Ok(format!("Preload off for {name}.test — it folds back into the shared master."))
             }
         }
@@ -917,7 +1026,7 @@ impl Registry {
             },
         );
         self.save()?;
-        self.reconcile();
+        self.reconcile_site(&name);
         Ok((name, warnings))
     }
 
@@ -1009,7 +1118,7 @@ impl Registry {
             Some(link) => {
                 link.secure = secure;
                 self.save()?;
-                self.reconcile();
+                self.reconcile_site(&name);
                 Ok(format!(
                     "{name}.test is now served over {}.",
                     if secure { "HTTPS" } else { "HTTP" }

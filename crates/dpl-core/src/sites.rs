@@ -250,6 +250,60 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
     sites
 }
 
+/// Resolve a single site by name without scanning every parked directory —
+/// the incremental-reconcile fast path. Mirrors [`resolve`]'s precedence
+/// (links win over parked dirs; first parked dir wins) but touches only the
+/// named site: a map lookup for links, a `join(name).is_dir()` stat per
+/// parked root otherwise. `None` = no such site anymore.
+pub fn resolve_one(config: &LocalConfig, name: &str) -> Option<ResolvedSite> {
+    let name = name.to_lowercase();
+    if name.is_empty() || name.starts_with('.') {
+        return None;
+    }
+    let tld = config.primary_tld();
+    let mode_of = |raw: Option<&String>| -> crate::xdebug::Mode {
+        raw.or(config.default_xdebug.as_ref())
+            .map(|m| crate::xdebug::Mode::parse(m).unwrap_or_default())
+            .unwrap_or_default()
+    };
+
+    if let Some(link) = config.links.get(&name) {
+        return Some(ResolvedSite {
+            name,
+            docroot: docroot_for(&link.path),
+            path: link.path.clone(),
+            php: link.php.clone().or_else(|| config.default_php.clone()),
+            secure: link.secure,
+            source: SiteSource::Linked,
+            tld,
+            runtime: link.runtime.clone(),
+            xdebug: mode_of(link.xdebug.as_ref()),
+            profile: link.profile,
+            preload: link.preload.as_ref().map(|p| link.path.join(p)),
+        });
+    }
+
+    for parked in &config.parked {
+        let path = parked.join(&name);
+        if path.is_dir() {
+            return Some(ResolvedSite {
+                name,
+                docroot: docroot_for(&path),
+                path,
+                php: config.default_php.clone(),
+                secure: false,
+                source: SiteSource::Parked,
+                tld,
+                runtime: None,
+                xdebug: mode_of(None),
+                profile: false,
+                preload: None,
+            });
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
