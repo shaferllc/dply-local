@@ -629,6 +629,8 @@ struct SiteProjectSection: View {
                     urlField(title: "Testing", text: $project.testingURL,
                              placeholder: "https://staging.example.com")
                 }
+                relatedSites
+                relatedPackages
                 todoList
             }
         }
@@ -693,6 +695,118 @@ struct SiteProjectSection: View {
         guard !raw.isEmpty else { return raw }
         if raw.contains("://") { return raw }
         return "https://" + raw
+    }
+
+    // MARK: Related sites
+
+    /// Other local sites that belong to the same product — the API next to the
+    /// app, the admin next to the storefront. Chips jump to that site's detail.
+    private var relatedSites: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Related sites").font(.caption).foregroundStyle(.secondary)
+                addSiteMenu
+                Spacer()
+            }
+            if !project.relatedSites.isEmpty {
+                // Wrapping chips: a simple flow via LazyVGrid-free HStacks is
+                // overkill at the handful-of-sites scale; one wrapping HStack.
+                HStack(spacing: 6) {
+                    ForEach(project.relatedSites, id: \.self) { name in
+                        HStack(spacing: 4) {
+                            Button(name) { store.siteJump = name }
+                                .buttonStyle(.plain)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Theme.violet)
+                            Button {
+                                project.relatedSites.removeAll { $0 == name }
+                            } label: { Image(systemName: "xmark").font(.system(size: 8)) }
+                            .buttonStyle(.plain).foregroundStyle(.tertiary)
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Theme.violet.opacity(0.12), in: Capsule())
+                    }
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    /// "+" menu of every other local site not already referenced.
+    private var addSiteMenu: some View {
+        Menu {
+            ForEach(candidateRelatedSites, id: \.self) { name in
+                Button(name) { project.relatedSites.append(name) }
+            }
+        } label: {
+            Image(systemName: "plus.circle").font(.caption)
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .disabled(candidateRelatedSites.isEmpty)
+        .help("Reference another local site that's part of this project")
+    }
+
+    private var candidateRelatedSites: [String] {
+        store.localSites
+            // Exclude this site (matched by project path — the section doesn't
+            // know its own site name) and anything already referenced.
+            .filter { $0.cell(["path"]) != projectPath }
+            .map { $0.cell(["name"]) }
+            .filter { !$0.isEmpty && !project.relatedSites.contains($0) }
+    }
+
+    // MARK: Related packages
+
+    /// Non-site code that belongs to this project — SDKs, composer packages,
+    /// shared libraries. Rows open in the configured editor or in Finder.
+    private var relatedPackages: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Related packages").font(.caption).foregroundStyle(.secondary)
+                Button { addPackage() } label: { Image(systemName: "plus.circle").font(.caption) }
+                    .buttonStyle(.borderless)
+                    .help("Reference a folder of code that's part of this project")
+                Spacer()
+            }
+            ForEach(project.relatedPackages) { pkg in
+                HStack(spacing: 8) {
+                    Image(systemName: "shippingbox").font(.caption).foregroundStyle(.secondary)
+                    Text(pkg.name).font(.callout.weight(.medium))
+                    Text(pkg.path)
+                        .font(.system(.caption, design: .monospaced)).foregroundStyle(.tertiary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button { store.openFolderInEditor(pkg.path) } label: {
+                        Image(systemName: "chevron.left.forwardslash.chevron.right").font(.caption2)
+                    }
+                    .buttonStyle(.borderless).help("Open in editor")
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: pkg.path)])
+                    } label: { Image(systemName: "folder").font(.caption2) }
+                    .buttonStyle(.borderless).help("Reveal in Finder")
+                    Button {
+                        project.relatedPackages.removeAll { $0.id == pkg.id }
+                    } label: { Image(systemName: "xmark").font(.caption2) }
+                    .buttonStyle(.borderless).foregroundStyle(.tertiary).help("Remove")
+                }
+            }
+        }
+    }
+
+    private func addPackage() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        panel.message = "Choose folders of code that are part of this project"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            let path = url.path
+            guard !project.relatedPackages.contains(where: { $0.path == path }) else { continue }
+            project.relatedPackages.append(
+                SiteProject.RelatedPackage(name: url.lastPathComponent, path: path))
+        }
     }
 
     // MARK: To-dos

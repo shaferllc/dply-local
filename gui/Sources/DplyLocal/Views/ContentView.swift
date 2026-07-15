@@ -34,6 +34,17 @@ struct ContentView: View {
             store.startLoadMonitor()
         }
         .onChange(of: store.section) { selection = nil; Task { await store.refreshCurrentSection() } }
+        // A "related site" chip asked to select a site. Switch to Local Sites
+        // first (its onChange nils the selection), then select on the next
+        // runloop turn so the clear can't stomp the jump.
+        .onChange(of: store.siteJump) { _, requested in
+            guard let requested else { return }
+            store.section = .local
+            DispatchQueue.main.async {
+                selection = requested
+                store.siteJump = nil
+            }
+        }
         .overlay(alignment: .top) {
             VStack(spacing: 6) {
                 if let paused = store.pausedDump {

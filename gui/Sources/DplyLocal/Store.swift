@@ -176,16 +176,24 @@ struct ValetSnapshot {
     var linked: [ValetSite] = []
 }
 
-/// User-authored notes pinned to a site: what it is, what's left to do, and
-/// where it lives beyond this machine. This is app-local metadata — `dpl` knows
-/// nothing about it — so it's persisted per-site in UserDefaults, keyed by the
-/// site name (the same scheme `ParitySheet` uses for its remote).
+/// User-authored notes pinned to a site: what it is, what's left to do, where
+/// it lives beyond this machine, and the other code that belongs to the same
+/// project. Persisted in the project itself (`.dpl/project.json`) so it
+/// travels with the repo.
 struct SiteProject: Codable, Equatable {
     /// One checklist item.
     struct Todo: Codable, Equatable, Identifiable {
         var id = UUID()
         var text: String
         var done = false
+    }
+
+    /// Another area of code that's part of this project but isn't a site —
+    /// an SDK, a composer package, a shared library checkout.
+    struct RelatedPackage: Codable, Equatable, Identifiable {
+        var id = UUID()
+        var name: String
+        var path: String
     }
 
     /// What the site is about — a short free-text description.
@@ -195,16 +203,37 @@ struct SiteProject: Codable, Equatable {
     /// A staging / testing URL, if the project has one.
     var testingURL = ""
     var todos: [Todo] = []
+    /// Names of other local sites that are part of the same project
+    /// (the API next to the app, the admin next to the storefront).
+    var relatedSites: [String] = []
+    /// Non-site code areas that belong to this project.
+    var relatedPackages: [RelatedPackage] = []
 
     /// Nothing worth surfacing yet — used to keep the section quiet until the
     /// user has actually written something.
     var isEmpty: Bool {
         summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && productionURL.isEmpty && testingURL.isEmpty && todos.isEmpty
+            && relatedSites.isEmpty && relatedPackages.isEmpty
     }
 
     /// Open to-do count, for a badge on the section header.
     var openTodos: Int { todos.filter { !$0.done }.count }
+
+    init() {}
+
+    /// Hand-rolled so project.json files written before the related-sites/
+    /// packages fields existed still decode (synthesized Decodable treats a
+    /// missing key as an error, defaults notwithstanding).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        productionURL = try c.decodeIfPresent(String.self, forKey: .productionURL) ?? ""
+        testingURL = try c.decodeIfPresent(String.self, forKey: .testingURL) ?? ""
+        todos = try c.decodeIfPresent([Todo].self, forKey: .todos) ?? []
+        relatedSites = try c.decodeIfPresent([String].self, forKey: .relatedSites) ?? []
+        relatedPackages = try c.decodeIfPresent([RelatedPackage].self, forKey: .relatedPackages) ?? []
+    }
 }
 
 /// Run an executable and capture stdout (off the main actor). Used to query
@@ -452,6 +481,11 @@ final class Store: ObservableObject {
     /// Which PHP version the Extensions page should open on, when something
     /// navigated there for a specific one (e.g. a site's context menu).
     @Published var extensionsVersion: String?
+
+    /// A site name something wants the Local Sites list to select — set by a
+    /// "related site" chip; ContentView consumes and clears it (the same
+    /// request/consume pattern as `extensionsVersion`).
+    @Published var siteJump: String?
 
     /// A CLI configured with the current settings.
     var cli: DplyCLI {
