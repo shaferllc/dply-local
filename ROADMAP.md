@@ -67,14 +67,12 @@ deleted branches remain as follow-ups.
 `dpl preload` (per-site `opcache.preload` on a dedicated master) plus the warm-up
 FastCGI hit on reconcile.
 
-### 10. Push-based tailing + incremental reconcile — first half shipped in 0.3.0
-- ~~Replace the System panel's 1.5s log poll with a `DispatchSource` file
-  watcher~~ — shipped (event-driven tailing).
-- Still open: make the daemon's reconcile incremental — touch only changed sites
-  instead of rebuilding every route on each config change. Also worth: a
-  pooled/persistent FastCGI connection to php-fpm instead of one socket per
-  request. (0.4.0 also cached per-site repo metadata across reconciles, so the
-  `dpl sites` read path no longer crawls the filesystem.)
+### 10. ✅ Push-based tailing + incremental reconcile — shipped (one item open)
+Event-driven log tailing shipped in 0.3.0; incremental reconcile shipped after
+0.4.1 — single-site mutations (`dpl secure`, pins, modes, link/unlink, `dpl up`)
+reconcile just that site, measured 1.75s → 0.01s at 150 sites. Still open: a
+pooled/persistent FastCGI connection to php-fpm instead of one socket per
+request.
 
 ---
 
