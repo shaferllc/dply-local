@@ -4,6 +4,7 @@
 pub mod daemon;
 pub mod doctor;
 pub mod dply;
+pub mod keel;
 pub mod local;
 pub mod mail;
 pub mod node;

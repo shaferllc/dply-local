@@ -327,6 +327,7 @@ dependencies = [
  "clap",
  "dpl-core",
  "dpl-dply",
+ "dpl-keel",
  "mail-parser",
  "serde",
  "serde_json",
@@ -364,6 +365,17 @@ version = "0.4.1"
 dependencies = [
  "anyhow",
  "dpl-core",
+]
+
+[[package]]
+name = "dpl-keel"
+version = "0.4.1"
+dependencies = [
+ "dpl-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/dpl-core",
     "crates/dpl-dply",
+    "crates/dpl-keel",
     "crates/dpl",
     "crates/dpld",
     "crates/dpl-helper",
@@ -20,6 +21,7 @@ repository = "https://github.com/tshafer/dply-local"
 # Shared crates
 dpl-core = { path = "crates/dpl-core" }
 dpl-dply = { path = "crates/dpl-dply" }
+dpl-keel = { path = "crates/dpl-keel" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

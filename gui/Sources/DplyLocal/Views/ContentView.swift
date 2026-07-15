@@ -122,6 +122,12 @@ struct ContentView: View {
                     sidebarRow(.account)
                 }
             }
+            if store.keelEnabled {
+                Section("keel cloud") {
+                    sidebarRow(.keelSites)
+                    sidebarRow(.keelAccount)
+                }
+            }
             Section("System") {
                 sidebarRow(.status)
                 sidebarRow(.system)
@@ -238,6 +244,16 @@ struct ContentView: View {
             )
         case .account:
             AccountView()
+        case .keelSites:
+            siteList(
+                store.keelSites, systemImage: "sailboat",
+                emptyTitle: "No Keel Cloud sites", emptyIcon: "sailboat",
+                emptyHint: "Log in under Keel Cloud, then refresh.",
+                title: ["name"], subtitle: ["custom_hostname", "prod_hostname"],
+                statusFor: { $0.cell(["status"]) }, activeFor: { $0.cell(["status"]) == "live" }
+            )
+        case .keelAccount:
+            KeelAccountView()
         }
     }
 
@@ -316,6 +332,12 @@ struct ContentView: View {
             } else { placeholder("Select a server", "externaldrive") }
         case .account:
             AccountDetailView()
+        case .keelSites:
+            if let id = selection, let row = store.keelSites.first(where: { $0.id == id }) {
+                KeelSiteDetailView(site: row).id(id)
+            } else { placeholder("Select a site", "sailboat") }
+        case .keelAccount:
+            placeholder("Keel Cloud", "cloud")
         }
     }
 

@@ -197,6 +197,7 @@ fn run() -> Result<()> {
         Command::Whoami => commands::dply::auth::whoami(host, home, args.json),
 
         Command::Dply(cmd) => commands::dply::run(cmd, host, home, args.json),
+        Command::Keel(cmd) => commands::keel::run(cmd, home, args.json),
     }
 }
 

@@ -354,6 +354,8 @@ enum Surface: String, CaseIterable, Identifiable {
     case sites = "Server Sites"
     case servers = "Servers"
     case account = "Account"
+    case keelSites = "Keel Sites"
+    case keelAccount = "Keel Cloud"
 
     var id: String { rawValue }
 
@@ -367,7 +369,19 @@ enum Surface: String, CaseIterable, Identifiable {
             return false
         }
     }
-    var isDply: Bool { !isLocal }
+    var isDply: Bool {
+        switch self {
+        case .edgeSites, .sites, .servers, .account: return true
+        default: return false
+        }
+    }
+    /// The Keel Cloud surfaces (need a Keel Cloud token).
+    var isKeel: Bool {
+        switch self {
+        case .keelSites, .keelAccount: return true
+        default: return false
+        }
+    }
 
     /// Surfaces that are a single page rather than a list + detail, so they get
     /// the whole window instead of being squeezed into the middle column.
@@ -395,6 +409,8 @@ enum Surface: String, CaseIterable, Identifiable {
         case .sites: return "server.rack"
         case .servers: return "externaldrive.connected.to.line.below"
         case .account: return "person.crop.circle"
+        case .keelSites: return "sailboat"
+        case .keelAccount: return "cloud"
         }
     }
 }
@@ -417,6 +433,36 @@ final class Store: ObservableObject {
             // Don't strand the user on a surface that just disappeared.
             if !dplyEnabled && section.isDply { section = .dashboard }
         }
+    }
+
+    /// Whether the Keel Cloud surfaces are shown. Opt-in, exactly like dply.
+    @Published var keelEnabled: Bool = Store.initialKeelEnabled() {
+        didSet {
+            UserDefaults.standard.set(keelEnabled, forKey: "keelEnabled")
+            if !keelEnabled && section.isKeel { section = .dashboard }
+        }
+    }
+
+    /// First launch: on iff a Keel Cloud token is already stored (CLI or MCP
+    /// setup predating the GUI surface) — the same grandfathering as dply.
+    private static func initialKeelEnabled() -> Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "keelEnabled") != nil {
+            return defaults.bool(forKey: "keelEnabled")
+        }
+        let enabled = hasKeelLogin()
+        defaults.set(enabled, forKey: "keelEnabled")
+        return enabled
+    }
+
+    /// Whether `~/.keel/cloud.json` holds a token.
+    static func hasKeelLogin() -> Bool {
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".keel/cloud.json")
+        guard let data = try? Data(contentsOf: path),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return !((root["token"] as? String) ?? "").isEmpty
     }
 
     /// Off by default — but somebody who already logged in through the CLI was
@@ -468,6 +514,8 @@ final class Store: ObservableObject {
     @Published var sites: [Row] = []
     @Published var servers: [Row] = []
     @Published var account: Row?
+    @Published var keelSites: [Row] = []
+    @Published var keelAccount: Row?
 
     // Status.
     @Published var isLoading = false
@@ -761,7 +809,50 @@ final class Store: ObservableObject {
             if let r = await background({ try cli.rows(["dply", "servers:list"]) }) { servers = r }
         case .account:
             await refreshAccount()
+        case .keelSites:
+            if let r = await background({ try cli.rows(["keel", "sites:list"]) }) { keelSites = r }
+        case .keelAccount:
+            await refreshKeelAccount()
         }
+    }
+
+    // MARK: Keel Cloud
+
+    func refreshKeelAccount() async {
+        let cli = self.cli
+        // `whoami` fails cleanly when logged out; a nil account renders the
+        // login state.
+        keelAccount = await backgroundQuiet { try cli.object(["keel", "whoami"]) }
+    }
+
+    /// Store a pasted Keel Cloud token (and optional non-default URL).
+    func keelLogin(token: String, url: String) async {
+        let cli = self.cli
+        var args = ["keel", "login", "--token", token]
+        let trimmed = url.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty { args.append(contentsOf: ["--url", trimmed]) }
+        _ = await background { try cli.runRaw(args) }
+        await refreshKeelAccount()
+        if keelAccount != nil { keelEnabled = true }
+    }
+
+    func keelLogout() async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["keel", "logout"]) }
+        keelAccount = nil
+    }
+
+    /// Deploy a Keel Cloud site to production (or preview).
+    func keelDeploy(id: String, preview: Bool = false) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["keel", preview ? "preview" : "publish", id]) }
+        await refreshCurrentSection(force: true)
+    }
+
+    /// Recent deploys for a Keel Cloud site (detail pane).
+    func keelDeploys(id: String) async -> [Row] {
+        let cli = self.cli
+        return await backgroundQuiet { try cli.rows(["keel", "deploys", id]) } ?? []
     }
 
     // MARK: Local site actions

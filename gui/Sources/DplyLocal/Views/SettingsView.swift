@@ -177,6 +177,17 @@ private struct DplySettings: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+
+        Section("Keel Cloud") {
+            Toggle(isOn: $store.keelEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Enable Keel Cloud integration")
+                    Text("Adds Keel Sites and Keel Cloud to the sidebar — deploy and manage Keel apps on keeljs.cloud.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
         .task { if store.dplyEnabled { await store.refreshAccount() } }
     }
 }

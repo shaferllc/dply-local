@@ -306,6 +306,55 @@ pub enum Command {
     /// dply platform commands (full parity with the dply CLI).
     #[command(subcommand)]
     Dply(DplyCommand),
+
+    /// Keel Cloud commands (sites, deploys, secrets, domains).
+    #[command(subcommand)]
+    Keel(KeelCommand),
+}
+
+/// `dpl keel <cmd>` — Keel Cloud, the hosted platform for Keel apps.
+#[derive(clap::Subcommand)]
+pub enum KeelCommand {
+    /// Store a Keel Cloud token (minted in the web UI at /tokens).
+    Login {
+        /// The token (keel_…). Prompted for when omitted.
+        #[arg(long)]
+        token: Option<String>,
+        /// Cloud URL when not app.keeljs.cloud (e.g. a local instance).
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Forget the stored token.
+    Logout,
+    /// Show the signed-in account and plan.
+    Whoami,
+    /// List the team's sites.
+    #[command(name = "sites:list")]
+    SitesList,
+    /// Show one site.
+    #[command(name = "sites:show")]
+    SitesShow { id: String },
+    /// Recent deploys for a site.
+    Deploys { id: String },
+    /// Deploy a site to production.
+    Publish { id: String },
+    /// Deploy a site to its preview hostname.
+    Preview { id: String },
+    /// List a site's secret keys.
+    #[command(name = "secrets:list")]
+    SecretsList { id: String },
+    /// Set a secret on a site.
+    #[command(name = "secrets:set")]
+    SecretsSet { id: String, key: String, value: String },
+    /// Remove a secret from a site.
+    #[command(name = "secrets:unset")]
+    SecretsUnset { id: String, key: String },
+    /// Point a custom domain at a site.
+    #[command(name = "domain:set")]
+    DomainSet { id: String, hostname: String },
+    /// Remove a site's custom domain.
+    #[command(name = "domain:clear")]
+    DomainClear { id: String },
 }
 
 #[derive(Args)]
