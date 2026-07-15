@@ -604,6 +604,11 @@ fn db_restore(engine: Engine, port: u16, db: &str, file: &str) -> Result<String>
     Ok(format!("Restored `{db}` from {file}."))
 }
 
+/// The default port of an engine named in a `dpl.toml` `services` list.
+pub(crate) fn default_port_of(engine: &str) -> Option<u16> {
+    Engine::from_name(engine).map(|e| e.default_port())
+}
+
 // ---- branch-aware databases (Postgres) ----
 //
 // The scheme (see dpl_core::branchdb): the base database always holds the

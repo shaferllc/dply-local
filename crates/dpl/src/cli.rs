@@ -57,6 +57,14 @@ pub enum Command {
         /// Directory to unpark (default: current directory).
         path: Option<String>,
     },
+    /// Apply this project's committed `dpl.toml` (or write one with --save).
+    Up {
+        /// Project directory (default: current directory).
+        path: Option<String>,
+        /// Capture the site's current settings into dpl.toml instead of applying.
+        #[arg(long)]
+        save: bool,
+    },
     /// Link a single project as a `.test` site.
     Link {
         /// Project directory (default: current directory).

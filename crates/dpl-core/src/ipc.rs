@@ -138,6 +138,13 @@ pub enum Request {
         port: Option<u16>,
     },
 
+    /// Apply a project's `dpl.toml` spec: link the site and set every captured
+    /// setting in one save + reconcile. `path` is the project root.
+    ApplySpec { path: String, spec: crate::spec::SiteSpec },
+    /// Capture the current settings of the site at `path` as a `SiteSpec`
+    /// (returned as a TOML `Message`), for `dpl up --save`.
+    ExportSpec { path: String },
+
     /// Any op this build doesn't understand (peer is newer).
     #[serde(other)]
     Unknown,

@@ -152,6 +152,7 @@ fn run() -> Result<()> {
         Command::Service { action, name, engine, version, port } => {
             commands::local::service(home.as_deref(), action, name, engine, version, port, args.json)
         }
+        Command::Up { path, save } => commands::local::up(home.as_deref(), path, save),
         Command::Db { action, name, branch, engine, port, file, database } => {
             commands::local::db(home.as_deref(), action, engine, name, branch, port, file, database)
         }

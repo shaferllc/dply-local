@@ -45,10 +45,12 @@ presentation.
 
 ## Workflow
 
-### 7. Committable team config (`dpl.toml`)
-A per-repo file capturing PHP/Node versions, extensions, services, and Xdebug so a
-teammate runs one `dpl up` and gets an identical environment. Turns "works on my
-machine" setup into a checked-in artifact; complements the existing `dpl parity`.
+### 7. ✅ Committable team config (`dpl.toml`) — shipped
+`dpl up` applies a repo's committed `dpl.toml` declaratively (PHP pin, HTTPS,
+runtime, Xdebug, profiler, preload, branch database, required services — checked,
+not auto-created); `dpl up --save` captures the current site into the file. Node
+is deliberately omitted: `.nvmrc` already travels with the repo. Extensions and
+service auto-provisioning remain as follow-ups.
 
 ### 8. ✅ Per-branch databases — shipped in 0.4.0, beyond the original spec
 Landed as *branch-aware databases* (`dpl db attach`): instead of dump/restore on

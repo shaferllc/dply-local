@@ -864,6 +864,41 @@ fn connection_strings(engine: &str, port: u16) -> (String, String) {
     }
 }
 
+/// `dpl up`: apply the project's `dpl.toml`, or capture one with `--save`.
+pub fn up(home: Option<&str>, path: Option<String>, save: bool) -> Result<()> {
+    let dir = match path {
+        Some(p) => std::fs::canonicalize(&p).with_context(|| format!("no such directory: {p}"))?,
+        None => std::env::current_dir().context("resolving current directory")?,
+    };
+    let file = dir.join(dpl_core::spec::FILE_NAME);
+
+    if save {
+        let request = Request::ExportSpec { path: dir.to_string_lossy().into_owned() };
+        return match daemon::call(request, home)? {
+            Response::Message { text } => {
+                std::fs::write(&file, &text).with_context(|| format!("writing {}", file.display()))?;
+                println!("Wrote {} — commit it; a teammate runs `dpl up` to match.", file.display());
+                Ok(())
+            }
+            other => crate::commands::unexpected(other),
+        };
+    }
+
+    let text = std::fs::read_to_string(&file).with_context(|| {
+        format!("no {} in {} — create one with `dpl up --save`", dpl_core::spec::FILE_NAME, dir.display())
+    })?;
+    let spec = dpl_core::spec::SiteSpec::from_toml(&text)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+    let request = Request::ApplySpec { path: dir.to_string_lossy().into_owned(), spec };
+    match daemon::call(request, home)? {
+        Response::Message { text } => {
+            println!("{text}");
+            Ok(())
+        }
+        other => crate::commands::unexpected(other),
+    }
+}
+
 /// Run a `dpl db` operation (optionally against a specific instance port).
 /// The branch-aware actions (attach/detach/switch/branches/drop-branch) take a
 /// *site* where the classic ones take a database, and speak their own request.

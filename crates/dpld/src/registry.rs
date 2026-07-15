@@ -844,6 +844,109 @@ impl Registry {
         }
     }
 
+    /// Apply a project's `dpl.toml` spec declaratively: the link ends up
+    /// matching the spec exactly (absent keys = defaults), in one save + one
+    /// reconcile. Returns (site name, warnings) — a bad preload path or an
+    /// unparsable Xdebug mode degrades that one setting with a warning rather
+    /// than failing the whole `dpl up`.
+    pub fn apply_spec(&mut self, path: &str, spec: &dpl_core::spec::SiteSpec) -> Result<(String, Vec<String>)> {
+        let path = canonicalize(path)?;
+        let name = match &spec.name {
+            Some(n) => n.to_lowercase(),
+            None => sites::name_for(&path).context("could not derive a site name from the path")?,
+        };
+        let mut warnings: Vec<String> = Vec::new();
+
+        // Validate the degradable settings up front.
+        let xdebug = match &spec.xdebug {
+            Some(m) => match Mode::parse(m) {
+                Ok(parsed) if !parsed.is_off() => Some(parsed.to_string()),
+                Ok(_) => None,
+                Err(e) => {
+                    warnings.push(format!("ignoring xdebug: {e:#}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        let runtime = match spec.runtime.as_deref() {
+            None | Some("fpm") | Some("") => None,
+            Some(r @ ("octane-swoole" | "octane-roadrunner" | "octane-frankenphp")) => Some(r.to_string()),
+            Some(other) => {
+                warnings.push(format!("ignoring unknown runtime `{other}`"));
+                None
+            }
+        };
+        let preload = match &spec.preload {
+            Some(rel) if path.join(rel).is_file() => Some(std::path::PathBuf::from(rel)),
+            Some(rel) => {
+                warnings.push(format!("ignoring preload: no script at {rel}"));
+                None
+            }
+            None => None,
+        };
+        if let Some(v) = &spec.php {
+            if dpl_core::php::resolve(v).is_none() {
+                warnings.push(format!("PHP {v} isn't installed — the site will run on the default until it is (`dpl php install {v}`)"));
+            }
+        }
+
+        // Keep the live-branch marker when the same database stays attached;
+        // a new attachment starts tracking the checked-out branch.
+        let db_branch = match &spec.database {
+            Some(db) => match self.config.links.get(&name) {
+                Some(l) if l.database.as_deref() == Some(db.as_str()) && l.db_branch.is_some() => l.db_branch.clone(),
+                _ => dpl_core::branchdb::git_branch(&path),
+            },
+            None => None,
+        };
+
+        self.config.links.insert(
+            name.clone(),
+            dpl_core::config::Link {
+                path,
+                php: spec.php.clone(),
+                secure: spec.secure,
+                runtime,
+                xdebug,
+                profile: spec.profile,
+                preload,
+                database: spec.database.clone(),
+                db_branch,
+                db_port: spec.db_port.filter(|p| *p != 5432),
+            },
+        );
+        self.save()?;
+        self.reconcile();
+        Ok((name, warnings))
+    }
+
+    /// Capture the site linked at `path` as a `SiteSpec` (for `dpl up --save`).
+    /// `services` is left empty — which engines a project needs is knowledge
+    /// the machine doesn't have; the user adds them to the file.
+    pub fn export_spec(&self, path: &str) -> Result<dpl_core::spec::SiteSpec> {
+        let path = canonicalize(path)?;
+        let (name, link) = self
+            .config
+            .links
+            .iter()
+            .find(|(_, l)| l.path == path)
+            .with_context(|| format!("{} is not a linked site — `dpl link` it first", path.display()))?;
+        Ok(dpl_core::spec::SiteSpec {
+            // Only carry the name when it isn't just the folder name.
+            name: (sites::name_for(&path).as_deref() != Some(name.as_str())).then(|| name.clone()),
+            php: link.php.clone(),
+            secure: link.secure,
+            runtime: link.runtime.clone(),
+            xdebug: link.xdebug.clone(),
+            profile: link.profile,
+            preload: link.preload.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            database: link.database.clone(),
+            db_port: link.db_port,
+            services: Vec::new(),
+        })
+    }
+
     /// A linked site's branch-DB state. `database`/`db_branch` are None until
     /// `dpl db attach`.
     pub fn branch_db_state(&self, site: &str) -> Result<BranchDbState> {

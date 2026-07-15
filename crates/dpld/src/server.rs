@@ -247,10 +247,63 @@ async fn dispatch(
         Request::BranchDb { action, site, branch, database, port } => {
             crate::branchdb::dispatch(state, &action, &site, branch, database, port).await
         }
+        Request::ApplySpec { path, spec } => apply_spec(state, &path, spec).await,
+        Request::ExportSpec { path } => {
+            let reg = state.registry.lock().await;
+            match reg.export_spec(&path) {
+                Ok(spec) => Response::Message { text: spec.to_toml() },
+                Err(e) => Response::Error { message: format!("{e:#}") },
+            }
+        }
         Request::Unknown => Response::Error {
             message: "unknown operation (client is newer than daemon?)".into(),
         },
     }
+}
+
+/// `dpl up`: apply a project's `dpl.toml` in one registry pass, then do the
+/// environment-side checks — ensure the branch database exists and report any
+/// required services that aren't listening. Settings warnings degrade, they
+/// don't fail; the site should come up as far as this machine allows.
+async fn apply_spec(state: &DaemonState, path: &str, spec: dpl_core::spec::SiteSpec) -> Response {
+    let (name, mut warnings) = {
+        let mut reg = state.registry.lock().await;
+        match reg.apply_spec(path, &spec) {
+            Ok(r) => r,
+            Err(e) => return Response::Error { message: format!("{e:#}") },
+        }
+    };
+
+    // Branch database: make sure the base exists (like `dpl db attach`).
+    if let Some(db) = spec.database.clone() {
+        let port = spec.db_port.unwrap_or(5432);
+        if crate::services::port_open(port) {
+            match tokio::task::spawn_blocking(move || crate::services::pg_ensure_db(port, &db)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => warnings.push(format!("branch database: {e:#}")),
+                Err(e) => warnings.push(format!("branch database: {e}")),
+            }
+        } else {
+            warnings.push(format!("branch database: nothing listening on Postgres port {port}"));
+        }
+    }
+
+    // Required services: check, don't create — versions and data are choices.
+    for engine in &spec.services {
+        match crate::services::default_port_of(engine) {
+            Some(port) if crate::services::port_open(port) => {}
+            Some(port) => warnings.push(format!(
+                "service `{engine}` isn't listening on :{port} — start it, or `dpl service create <name> --engine {engine}`"
+            )),
+            None => warnings.push(format!("unknown service `{engine}` in dpl.toml")),
+        }
+    }
+
+    let mut text = format!("Up: {name}.test matches dpl.toml.");
+    for w in &warnings {
+        text.push_str(&format!("\n  ⚠ {w}"));
+    }
+    Response::Message { text }
 }
 
 /// Map a service action's `Option<Result<String>>` to a response (None means
