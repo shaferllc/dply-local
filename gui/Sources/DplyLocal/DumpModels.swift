@@ -247,7 +247,12 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
             method, url, ability, result, user, component,
             status?.display,
         ]
-        parts.append(contentsOf: (from ?? []) + (to ?? []) + (cc ?? []) + (bcc ?? []))
+        // One list at a time — chaining these with `+` sends the type-checker
+        // into overload-resolution hell (CI's Xcode times out on it).
+        parts.append(contentsOf: from ?? [])
+        parts.append(contentsOf: to ?? [])
+        parts.append(contentsOf: cc ?? [])
+        parts.append(contentsOf: bcc ?? [])
         parts.append(contentsOf: (bindings ?? []).map { $0.display })
         parts.append(contentsOf: (values ?? []).map { $0.searchText() })
         parts.append(data?.searchText())
