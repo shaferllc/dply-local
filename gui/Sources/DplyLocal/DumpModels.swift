@@ -70,6 +70,24 @@ struct DumpNode: Decodable, Hashable {
         if case .string(let s) = key { return s }
         return key.display
     }
+
+    /// This node and its descendants as indented `key: value` lines, for copying.
+    func plainText(depth: Int = 0) -> String {
+        let pad = String(repeating: "  ", count: depth)
+        let head = keyDisplay.map { "\($0): \(summary)" } ?? summary
+        guard isExpandable else { return pad + head }
+        return ([pad + head] + (children ?? []).map { $0.plainText(depth: depth + 1) })
+            .joined(separator: "\n")
+    }
+
+    /// Flattened key/value text of the whole subtree, for the search index.
+    /// Capped in depth so a deep object graph can't blow up the index.
+    func searchText(depth: Int = 0) -> String {
+        guard depth < 6 else { return "" }
+        var parts = [keyDisplay, summary, className].compactMap { $0 }
+        for child in children ?? [] { parts.append(child.searchText(depth: depth + 1)) }
+        return parts.joined(separator: " ")
+    }
 }
 
 /// One received event — a value dump (`type:"dump"`), a SQL query
@@ -131,6 +149,12 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
     var pause: Bool?
     var token: String?
 
+    /// The original NDJSON line, kept so "Copy as JSON" is lossless. Not decoded.
+    var raw: String?
+    /// Lowercased haystack built once on arrival — `filteredDumps` re-runs on
+    /// every keystroke and every appended entry, so this must not be recomputed.
+    var searchIndex: String = ""
+
     enum CodingKeys: String, CodingKey {
         case id, type, site, screen, label, color, file, line, context, received_at, values
         case sql, bindings, connection, slow, count
@@ -184,11 +208,103 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
         }
     }
 
-    var time: String {
-        guard let ms = received_at else { return "" }
-        let date = Date(timeIntervalSince1970: ms / 1000)
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f.string(from: date)
+    var time: String { Self.clock.string(from: date) }
+    var timeWithMillis: String { Self.clockMillis.string(from: date) }
+
+    private var date: Date { Date(timeIntervalSince1970: (received_at ?? 0) / 1000) }
+
+    private static let clock: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f
+    }()
+    private static let clockMillis: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
+    }()
+
+    /// Human name for the kind, used in menus and the type filter.
+    var kindLabel: String {
+        switch kind {
+        case "query": return "Query"
+        case "n1": return "N+1"
+        case "log": return "Log"
+        case "mail": return "Mail"
+        case "job": return "Job"
+        case "http": return "HTTP"
+        case "event": return "Event"
+        case "gate": return "Gate"
+        case "livewire": return "Livewire"
+        case "time": return "Timer"
+        default: return "Dump"
+        }
+    }
+
+    /// Everything worth searching, lowercased. Built once in `Store.appendDump`.
+    /// Covers the payload bodies (SQL, log message, mail subject, node values),
+    /// not just the one-line preview.
+    mutating func buildSearchIndex() {
+        var parts: [String?] = [
+            label, location, file, site, screen, kind, preview,
+            sql, rawSql, connection, message, level, subject, name, queue,
+            method, url, ability, result, user, component,
+            status?.display,
+        ]
+        parts.append(contentsOf: (from ?? []) + (to ?? []) + (cc ?? []) + (bcc ?? []))
+        parts.append(contentsOf: (bindings ?? []).map { $0.display })
+        parts.append(contentsOf: (values ?? []).map { $0.searchText() })
+        parts.append(data?.searchText())
+        parts.append(arguments?.searchText())
+        if let text, text.count <= 4096 { parts.append(text) }
+        searchIndex = parts.compactMap { $0 }.joined(separator: " ").lowercased()
+    }
+
+    /// A plain-text rendering of the whole entry, for ⌘C / "Copy".
+    var plainText: String {
+        var out = ["[\(timeWithMillis)] \(kindLabel)"]
+        if let site { out[0] += " · \(site)" }
+        if let loc = location { out[0] += " · \(loc)" }
+        switch kind {
+        case "query", "n1":
+            out.append(rawSql ?? sql ?? "")
+            if kind == "n1" { out.append("ran \(count ?? 0) times — likely N+1") }
+            if let ms = timeMs { out.append(String(format: "%.2f ms", ms)) }
+        case "log":
+            out.append("\((level ?? "info").uppercased()): \(message ?? "")")
+            if let data { out.append(data.plainText()) }
+        case "mail":
+            out.append("Subject: \(subject ?? "")")
+            if let v = from, !v.isEmpty { out.append("From: \(v.joined(separator: ", "))") }
+            if let v = to, !v.isEmpty { out.append("To: \(v.joined(separator: ", "))") }
+            if let text { out.append(text) }
+        case "http":
+            out.append("\(method ?? "") \(url ?? "") \(status?.display ?? "")")
+        case "event":
+            out.append(name ?? "")
+            if let data { out.append(data.plainText()) }
+        case "gate":
+            out.append("\(ability ?? "") → \(result ?? "")")
+            if let arguments { out.append(arguments.plainText()) }
+        case "livewire":
+            out.append(component ?? "")
+            if let data { out.append(data.plainText()) }
+        case "job":
+            out.append("\(name ?? "") \(status?.display ?? "")")
+        default:
+            if let label, !label.isEmpty { out.append(label) }
+            out.append(contentsOf: (values ?? []).map { $0.plainText() })
+        }
+        return out.filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+
+    /// The single most useful string to copy for this kind — bound to ⌘⇧C.
+    var primaryCopyText: String? {
+        switch kind {
+        case "query", "n1": return rawSql ?? sql
+        case "log": return message
+        case "http": return url
+        case "mail": return subject
+        case "event": return name
+        case "livewire": return component
+        case "gate": return ability
+        default: return nil
+        }
     }
 }

@@ -7,6 +7,13 @@ struct DumpsListView: View {
     @EnvironmentObject var store: Store
     @Binding var selection: String?
 
+    /// Categories offered in the type picker, in menu order.
+    private static let categories: [(id: String, label: String)] = [
+        ("dump", "Dumps"), ("query", "Queries"), ("log", "Logs"), ("mail", "Mail"),
+        ("job", "Jobs"), ("http", "HTTP"), ("event", "Events"), ("gate", "Gates"),
+        ("livewire", "Livewire"), ("time", "Timers"),
+    ]
+
     var body: some View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -21,65 +28,170 @@ struct DumpsListView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if store.filteredDumps.isEmpty {
+        if store.dumps.isEmpty {
             ContentUnavailableView(
                 "No dumps yet",
                 systemImage: "ladybug",
                 description: Text("Call `dumps($var)` in any served .test site (composer require shaferllc/dumps). It just works — no config.")
             )
+        } else if store.filteredDumps.isEmpty {
+            ContentUnavailableView {
+                Label("No matches", systemImage: "line.3.horizontal.decrease.circle")
+            } description: {
+                Text("\(store.dumps.count) dumps received, none match the current filters.")
+            } actions: {
+                Button("Reset filters") { resetFilters() }
+            }
         } else {
             ScrollViewReader { proxy in
                 List(selection: $selection) {
                     ForEach(store.filteredDumps) { dump in
-                        DumpRow(dump: dump).tag(String(dump.id))
+                        DumpRow(dump: dump, query: store.dumpSearch)
+                            .tag(String(dump.id))
+                            .contextMenu { DumpContextMenu(dump: dump) }
                     }
                 }
                 .onChange(of: store.dumps.count) {
-                    if let last = store.filteredDumps.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
+                    guard store.dumpsAutoscroll, let last = store.filteredDumps.last else { return }
+                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !store.dumpsAutoscroll { jumpToLatest(proxy) }
                 }
             }
         }
     }
 
+    /// Shown while following is off, so the tail is always one click away.
+    private func jumpToLatest(_ proxy: ScrollViewProxy) -> some View {
+        Button {
+            if let last = store.filteredDumps.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
+        } label: {
+            Label("Latest", systemImage: "arrow.down.to.line")
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 9).padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().stroke(Color(nsColor: .separatorColor)))
+        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        .padding(12)
+    }
+
+    private func resetFilters() {
+        store.dumpSiteFilter = nil
+        store.dumpScreenFilter = nil
+        store.dumpTypeFilter = nil
+        store.dumpSearch = ""
+    }
+
+    /// Two rows: the pickers alone are wider than this column, so the search
+    /// field gets its own line rather than being crushed to nothing.
     private var filterBar: some View {
-        HStack(spacing: 8) {
-            Picker("", selection: $store.dumpSiteFilter) {
-                Text("All sites").tag(String?.none)
-                ForEach(store.dumpSites, id: \.self) { Text($0).tag(String?.some($0)) }
-            }
-            .labelsHidden().fixedSize()
-            Picker("", selection: $store.dumpTypeFilter) {
-                Text("All types").tag(String?.none)
-                Text("Dumps").tag(String?.some("dump"))
-                Text("Queries").tag(String?.some("query"))
-                Text("Logs").tag(String?.some("log"))
-                Text("Mail").tag(String?.some("mail"))
-                Text("Jobs").tag(String?.some("job"))
-                Text("HTTP").tag(String?.some("http"))
-                Text("Events").tag(String?.some("event"))
-                Text("Gates").tag(String?.some("gate"))
-                Text("Livewire").tag(String?.some("livewire"))
-            }
-            .labelsHidden().fixedSize()
-            if !store.dumpScreens.isEmpty {
-                Picker("", selection: $store.dumpScreenFilter) {
-                    Text("All screens").tag(String?.none)
-                    ForEach(store.dumpScreens, id: \.self) { Text($0).tag(String?.some($0)) }
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Picker("", selection: $store.dumpSiteFilter) {
+                    Text("All sites").tag(String?.none)
+                    ForEach(store.dumpSites, id: \.self) { Text($0).tag(String?.some($0)) }
                 }
-                .labelsHidden().fixedSize()
+                .labelsHidden()
+                typePicker
+                if !store.dumpScreens.isEmpty {
+                    Picker("", selection: $store.dumpScreenFilter) {
+                        Text("All screens").tag(String?.none)
+                        ForEach(store.dumpScreens, id: \.self) { Text($0).tag(String?.some($0)) }
+                    }
+                    .labelsHidden()
+                }
             }
-            Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.tertiary)
-            TextField("Filter…", text: $store.dumpSearch)
-                .textFieldStyle(.plain)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.tertiary)
+                TextField("Filter…", text: $store.dumpSearch)
+                    .textFieldStyle(.plain)
+                if !store.dumpSearch.isEmpty {
+                    Button { store.dumpSearch = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain).help("Clear the filter")
+                }
+                Text(countLabel)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .fixedSize()
+                Toggle(isOn: $store.dumpsAutoscroll) {
+                    Image(systemName: store.dumpsAutoscroll ? "arrow.down.circle.fill" : "arrow.down.circle")
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.borderless)
+                .help(store.dumpsAutoscroll
+                      ? "Following new dumps — click to hold the scroll position"
+                      : "Not following — click to resume following the newest dump")
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
+    }
+
+    /// "15" when nothing is filtered out, "6 / 15" when something is.
+    private var countLabel: String {
+        let shown = store.filteredDumps.count, total = store.dumps.count
+        return shown == total ? "\(total)" : "\(shown) / \(total)"
+    }
+
+    /// Type filter, annotated with how many entries of each kind survive the
+    /// other filters — so you can see there are 40 queries before switching.
+    private var typePicker: some View {
+        let counts = store.dumpCounts
+        return Picker("", selection: $store.dumpTypeFilter) {
+            Text("All types").tag(String?.none)
+            ForEach(Self.categories, id: \.id) { cat in
+                let n = counts[cat.id] ?? 0
+                Text(n > 0 ? "\(cat.label) (\(n))" : cat.label).tag(String?.some(cat.id))
+            }
+        }
+        .labelsHidden().fixedSize()
+    }
+}
+
+/// Right-click actions shared by the list row and the detail header.
+struct DumpContextMenu: View {
+    @EnvironmentObject var store: Store
+    let dump: DumpEntry
+
+    var body: some View {
+        if let file = dump.file, let loc = dump.location {
+            Button("Open \(loc)", systemImage: "arrow.up.forward.app") {
+                store.openInEditor(file: file, line: dump.line)
+            }
+            Divider()
+        }
+        if let primary = dump.primaryCopyText, !primary.isEmpty {
+            Button("Copy \(dump.kindLabel)", systemImage: "doc.on.doc") { store.copyToPasteboard(primary) }
+        }
+        Button("Copy as Text", systemImage: "doc.plaintext") { store.copyToPasteboard(dump.plainText) }
+        if let raw = dump.raw {
+            Button("Copy as JSON", systemImage: "curlybraces") { store.copyToPasteboard(raw) }
+        }
+        Divider()
+        if let site = dump.site {
+            Button("Only \(site)", systemImage: "line.3.horizontal.decrease.circle") { store.dumpSiteFilter = site }
+        }
+        if let screen = dump.screen {
+            Button("Only screen \(screen)", systemImage: "rectangle.on.rectangle") { store.dumpScreenFilter = screen }
+        }
+        Button("Only \(dump.kindLabel)s", systemImage: "square.stack.3d.up") { store.dumpTypeFilter = dump.category }
+        Divider()
+        Button(role: .destructive) { store.hideDump(dump.id) } label: {
+            Label("Hide", systemImage: "eye.slash")
+        }
     }
 }
 
 /// A compact row in the dump list — value dump, SQL query, or N+1 warning.
 struct DumpRow: View {
     let dump: DumpEntry
+    /// Active search text, highlighted inside the title.
+    var query: String = ""
 
     var body: some View {
         HStack(spacing: 9) {
@@ -93,29 +205,45 @@ struct DumpRow: View {
             trailing
         }
         .padding(.vertical, 3)
+        .help(dump.timeWithMillis)
     }
 
     @ViewBuilder private var title: some View {
         HStack(spacing: 6) {
             switch dump.kind {
             case "query", "http":
-                Text(dump.preview).font(.system(.callout, design: .monospaced)).lineLimit(1)
+                highlight(dump.preview).font(.system(.callout, design: .monospaced)).lineLimit(1)
             case "n1":
-                Text("N+1 · \(dump.sql ?? "")").font(.system(.callout, design: .monospaced)).lineLimit(1)
+                highlight("N+1 · \(dump.sql ?? "")").font(.system(.callout, design: .monospaced)).lineLimit(1)
             case "dump":
                 if let label = dump.label, !label.isEmpty {
-                    Text(label).font(.callout.weight(.semibold))
+                    highlight(label).font(.callout.weight(.semibold))
                 } else {
-                    Text(dump.preview).font(.callout).lineLimit(1)
+                    highlight(dump.preview).font(.callout).lineLimit(1)
                 }
             default:
-                Text(dump.preview).font(.callout).lineLimit(1)
+                highlight(dump.preview).font(.callout).lineLimit(1)
             }
             if let site = dump.site {
                 Text(site).font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Color.secondary.opacity(0.15), in: Capsule()).foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// The title with every occurrence of the search text tinted, so you can see
+    /// *why* a row matched when the hit is deep in a long SQL string.
+    private func highlight(_ text: String) -> Text {
+        guard !query.isEmpty else { return Text(text) }
+        var attributed = AttributedString(text)
+        var search = attributed.startIndex..<attributed.endIndex
+        while let found = attributed[search].range(of: query, options: .caseInsensitive) {
+            attributed[found].backgroundColor = .yellow.opacity(0.28)
+            attributed[found].foregroundColor = .primary
+            guard found.upperBound < attributed.endIndex else { break }
+            search = found.upperBound..<attributed.endIndex
+        }
+        return Text(attributed)
     }
 
     @ViewBuilder private var subtitle: some View {
@@ -146,6 +274,7 @@ struct DumpRow: View {
                 if let screen = dump.screen { Text("· \(screen)").font(.caption2).foregroundStyle(.tertiary) }
             }
         }
+        .lineLimit(1)
     }
 
     @ViewBuilder private var trailing: some View {
@@ -229,10 +358,29 @@ struct DumpRow: View {
     }
 }
 
+/// A broadcast "expand/collapse everything" command. The token changes on each
+/// press so `onChange` fires even when the direction repeats.
+struct ExpandSignal: Equatable {
+    var token: Int = 0
+    var expand: Bool = false
+}
+
 /// Detail: metadata header (open-in-editor) + the value trees.
 struct DumpDetailView: View {
     @EnvironmentObject var store: Store
     let dump: DumpEntry
+
+    @State private var expansion = ExpandSignal()
+
+    /// True when the body renders a value tree that expand/collapse-all applies to.
+    private var hasTree: Bool {
+        switch dump.kind {
+        case "log", "event", "livewire": return dump.data?.isExpandable == true
+        case "gate": return dump.arguments?.isExpandable == true
+        case "query", "n1", "mail", "job", "http": return false
+        default: return dump.diff != true && (dump.values ?? []).contains { $0.isExpandable }
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -249,17 +397,31 @@ struct DumpDetailView: View {
                 case "event": eventBody
                 case "gate": gateBody
                 case "livewire": livewireBody
+                case "time": timeBody
                 default:
                     if dump.diff == true, let vals = dump.values, vals.count >= 2 {
                         DiffView(before: vals[0], after: vals[1])
                     } else {
                         ForEach(Array((dump.values ?? []).enumerated()), id: \.offset) { _, node in
-                            DumpNodeView(node: node, depth: 0, initiallyExpanded: true)
+                            DumpNodeView(node: node, depth: 0, initiallyExpanded: true, signal: expansion)
                         }
                     }
                 }
             }
             .padding(16)
+        }
+        .contextMenu { DumpContextMenu(dump: dump) }
+    }
+
+    @ViewBuilder private var timeBody: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "timer").foregroundStyle(.mint)
+            Text(dump.label ?? "timer").font(.callout.weight(.semibold))
+            Spacer()
+            if let ms = dump.timeMs {
+                Text(String(format: "%.2f ms", ms))
+                    .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -321,7 +483,7 @@ struct DumpDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let data = dump.data {
                 DetailSection(title: "Context") {
-                    DumpNodeView(node: data, depth: 0, initiallyExpanded: true)
+                    DumpNodeView(node: data, depth: 0, initiallyExpanded: true, signal: expansion)
                 }
             }
         }
@@ -407,7 +569,7 @@ struct DumpDetailView: View {
                 .foregroundStyle(.indigo)
             if let data = dump.data {
                 DetailSection(title: "Payload") {
-                    DumpNodeView(node: data, depth: 0, initiallyExpanded: true)
+                    DumpNodeView(node: data, depth: 0, initiallyExpanded: true, signal: expansion)
                 }
             } else {
                 Text("No payload.").font(.callout).foregroundStyle(.secondary)
@@ -428,7 +590,7 @@ struct DumpDetailView: View {
             if let u = dump.user { Text("user: \(u)").font(.callout).foregroundStyle(.secondary) }
             if let args = dump.arguments {
                 DetailSection(title: "Arguments") {
-                    DumpNodeView(node: args, depth: 0, initiallyExpanded: true)
+                    DumpNodeView(node: args, depth: 0, initiallyExpanded: true, signal: expansion)
                 }
             }
         }
@@ -439,7 +601,7 @@ struct DumpDetailView: View {
             Text(dump.component ?? "").font(.title3.weight(.bold)).foregroundStyle(.pink)
             if let data = dump.data {
                 DetailSection(title: "Properties") {
-                    DumpNodeView(node: data, depth: 0, initiallyExpanded: true)
+                    DumpNodeView(node: data, depth: 0, initiallyExpanded: true, signal: expansion)
                 }
             }
         }
@@ -465,13 +627,17 @@ struct DumpDetailView: View {
             HStack(spacing: 8) {
                 if let label = dump.label, !label.isEmpty {
                     Text(label).font(.title3.weight(.bold)).foregroundStyle(colorFor(dump.color))
+                } else {
+                    Text(dump.kindLabel).font(.title3.weight(.bold)).foregroundStyle(.secondary)
                 }
                 if let site = dump.site {
                     Text(site).font(.caption).padding(.horizontal, 6).padding(.vertical, 2)
                         .background(Color.secondary.opacity(0.15), in: Capsule()).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text(dump.time).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                headerActions
+                Text(dump.timeWithMillis)
+                    .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
                 if let file = dump.file, let loc = dump.location {
@@ -489,25 +655,54 @@ struct DumpDetailView: View {
             }
         }
     }
+
+    @ViewBuilder private var headerActions: some View {
+        if hasTree {
+            Button { expansion = ExpandSignal(token: expansion.token + 1, expand: true) } label: {
+                Image(systemName: "chevron.down.square")
+            }
+            .buttonStyle(.borderless).help("Expand all")
+            Button { expansion = ExpandSignal(token: expansion.token + 1, expand: false) } label: {
+                Image(systemName: "chevron.right.square")
+            }
+            .buttonStyle(.borderless).help("Collapse all")
+        }
+        Menu {
+            DumpContextMenu(dump: dump)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Copy, filter, and open actions")
+    }
 }
 
 /// Recursive collapsible tree row for a dumped value.
 struct DumpNodeView: View {
+    @EnvironmentObject var store: Store
     let node: DumpNode
     let depth: Int
     var initiallyExpanded: Bool = false
+    /// Expand/collapse-all broadcast from the detail header.
+    var signal: ExpandSignal = ExpandSignal()
     @State private var expanded: Bool = false
 
     var body: some View {
         if node.isExpandable {
             DisclosureGroup(isExpanded: $expanded) {
                 ForEach(Array((node.children ?? []).enumerated()), id: \.offset) { _, child in
-                    DumpNodeView(node: child, depth: depth + 1)
+                    DumpNodeView(node: child, depth: depth + 1, signal: signal)
                 }
             } label: {
                 rowLabel
             }
-            .onAppear { if initiallyExpanded { expanded = true } }
+            // A node revealed *by* expand-all is built after the signal fired, so
+            // it never sees the onChange — it has to read the signal on appear or
+            // the expansion stops one level deep.
+            .onAppear { expanded = initiallyExpanded || signal.expand }
+            .onChange(of: signal) { expanded = signal.expand }
         } else {
             rowLabel.padding(.leading, 2)
         }
@@ -526,8 +721,31 @@ struct DumpNodeView: View {
             if let vis = node.visibility, vis != "public" {
                 Text(vis).font(.caption2).foregroundStyle(.tertiary)
             }
+            // `array(n)` already carries its size in the summary; objects don't.
+            if node.type == "object", let n = node.children?.count, n > 0 {
+                Text("\(n)")
+                    .font(.caption2.monospacedDigit())
+                    .padding(.horizontal, 4)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                    .foregroundStyle(.tertiary)
+            }
+            // Without this the leaf rows center themselves in the detail pane.
+            Spacer(minLength: 0)
         }
         .lineLimit(1)
+        .contextMenu {
+            Button("Copy Value", systemImage: "doc.on.doc") {
+                store.copyToPasteboard(node.value?.display ?? node.summary)
+            }
+            if let key = node.keyDisplay {
+                Button("Copy Key", systemImage: "key") { store.copyToPasteboard(key) }
+            }
+            if node.isExpandable {
+                Button("Copy Subtree", systemImage: "list.bullet.indent") {
+                    store.copyToPasteboard(node.plainText())
+                }
+            }
+        }
     }
 
     private var keyColor: Color { .secondary }

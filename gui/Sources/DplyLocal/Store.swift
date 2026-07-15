@@ -1057,6 +1057,9 @@ final class Store: ObservableObject {
     @Published var dumpSearch: String = ""
     /// Editor for jump-to-source: "code" | "cursor" | "phpstorm" | "subl" | "system".
     @AppStorage("dumpsEditor") var dumpsEditor: String = "code"
+    /// Follow the tail of the stream. Turned off automatically when the user
+    /// scrolls away from the bottom, so a burst of dumps can't yank the view.
+    @AppStorage("dumpsAutoscroll") var dumpsAutoscroll: Bool = true
 
     private var dumpStreamTask: Task<Void, Never>?
     private let dumpsPort = 9912
@@ -1075,8 +1078,10 @@ final class Store: ObservableObject {
                     let (bytes, _) = try await URLSession.shared.bytes(for: req)
                     for try await line in bytes.lines {
                         guard let data = line.data(using: .utf8),
-                              let entry = try? JSONDecoder().decode(DumpEntry.self, from: data)
+                              var entry = try? JSONDecoder().decode(DumpEntry.self, from: data)
                         else { continue }
+                        entry.raw = line
+                        entry.buildSearchIndex()
                         await self.appendDump(entry)
                     }
                 } catch {
@@ -1092,12 +1097,19 @@ final class Store: ObservableObject {
     @Published var pausedDump: DumpEntry?
 
     private func appendDump(_ entry: DumpEntry) {
-        // Backfill can resend ids we already have; de-dupe.
-        if dumps.last?.id == entry.id || dumps.contains(where: { $0.id == entry.id }) { return }
+        // Backfill can resend ids we already have; de-dupe. A set, not a linear
+        // scan — a single request can emit hundreds of query dumps at once.
+        guard dumpIDs.insert(entry.id).inserted else { return }
         dumps.append(entry)
-        if dumps.count > maxDumps { dumps.removeFirst(dumps.count - maxDumps) }
+        let overflow = dumps.count - maxDumps
+        if overflow > 0 {
+            for d in dumps[..<overflow] { dumpIDs.remove(d.id) }
+            dumps.removeFirst(overflow)
+        }
         if entry.pause == true, entry.token != nil { pausedDump = entry }
     }
+
+    private var dumpIDs = Set<Int>()
 
     /// Resume a paused breakpoint: "continue" lets the request proceed, "stop"
     /// terminates it.
@@ -1112,6 +1124,7 @@ final class Store: ObservableObject {
     /// Clear both the daemon ring buffer and the local list.
     func clearDumps() async {
         dumps.removeAll()
+        dumpIDs.removeAll()
         var req = URLRequest(url: URL(string: "http://127.0.0.1:\(dumpsPort)/dumps/clear")!)
         req.httpMethod = "POST"
         _ = try? await URLSession.shared.data(for: req)
@@ -1124,18 +1137,33 @@ final class Store: ObservableObject {
         Array(Set(dumps.compactMap { $0.screen })).sorted()
     }
 
-    var filteredDumps: [DumpEntry] {
-        dumps.filter { d in
-            (dumpSiteFilter == nil || d.site == dumpSiteFilter)
-                && (dumpScreenFilter == nil || d.screen == dumpScreenFilter)
-                && (dumpTypeFilter == nil || d.category == dumpTypeFilter)
-                && (dumpSearch.isEmpty || matches(d, dumpSearch))
+    /// How many entries fall in each category, ignoring the type filter itself —
+    /// so the type picker can show counts that reflect the site/screen/search
+    /// filters currently in effect.
+    var dumpCounts: [String: Int] {
+        dumps.reduce(into: [:]) { counts, d in
+            guard passesNonTypeFilters(d) else { return }
+            counts[d.category, default: 0] += 1
         }
     }
 
-    private func matches(_ d: DumpEntry, _ q: String) -> Bool {
-        let hay = [d.label, d.location, d.preview, d.site].compactMap { $0 }.joined(separator: " ").lowercased()
-        return hay.contains(q.lowercased())
+    var filteredDumps: [DumpEntry] {
+        dumps.filter { d in
+            passesNonTypeFilters(d) && (dumpTypeFilter == nil || d.category == dumpTypeFilter)
+        }
+    }
+
+    private func passesNonTypeFilters(_ d: DumpEntry) -> Bool {
+        (dumpSiteFilter == nil || d.site == dumpSiteFilter)
+            && (dumpScreenFilter == nil || d.screen == dumpScreenFilter)
+            && (dumpSearch.isEmpty || d.searchIndex.contains(dumpSearch.lowercased()))
+    }
+
+    /// Remove a single entry from the local list. The daemon's ring buffer still
+    /// holds it, so this is a view-level dismiss, not a delete.
+    func hideDump(_ id: Int) {
+        dumps.removeAll { $0.id == id }
+        dumpIDs.remove(id)
     }
 
     /// Open a dump's source file at its line in the configured editor.
