@@ -48,7 +48,7 @@ struct DashboardView: View {
                 }
             }
             Spacer()
-            Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
+            Button { Task { await refresh(force: true) } } label: { Image(systemName: "arrow.clockwise") }
         }
     }
 
@@ -219,9 +219,12 @@ struct DashboardView: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(.separator.opacity(0.5), lineWidth: 1))
     }
 
-    private func refresh() async {
-        await store.loadLocal()
-        await store.loadServices()
+    /// Load everything the dashboard shows. Sites + services go through the
+    /// shared section refresh (guarded, so this doesn't re-fetch what the
+    /// navigation load just fetched); the health/process/worker cards are the
+    /// dashboard's own. The toolbar button forces a full re-fetch.
+    private func refresh(force: Bool = false) async {
+        await store.refreshCurrentSection(force: force)
         health = await store.doctor()
         top = await store.topProcesses()
         workers = await store.detectWorkers()

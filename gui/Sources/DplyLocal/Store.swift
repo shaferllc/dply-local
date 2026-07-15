@@ -482,7 +482,8 @@ final class Store: ObservableObject {
         // Keep the dumps stream live from launch so dumps accumulate even
         // before the panel is opened.
         startDumpsStream()
-        await refreshCurrentSection()
+        // An explicit refresh (launch, ⌘R, the toolbar button) always fetches.
+        await refreshCurrentSection(force: true)
     }
 
     func loadPhpVersions() async {
@@ -672,11 +673,31 @@ final class Store: ObservableObject {
         await restartDaemon()
     }
 
-    func refreshCurrentSection() async {
+    /// When each section last loaded, so returning to one within a short window
+    /// reuses what's already in memory instead of re-shelling out to `dpl`.
+    /// Every sidebar click used to re-run the section's commands unconditionally.
+    private var sectionRefreshedAt: [Surface: Date] = [:]
+    /// How long a section's data is considered fresh enough to skip a reload.
+    private let sectionStaleAfter: TimeInterval = 2
+
+    /// Load the data the current section needs. Skips the work when the section
+    /// was refreshed within `sectionStaleAfter` — unless `force` (⌘R, the
+    /// refresh button, and post-action reloads always fetch).
+    func refreshCurrentSection(force: Bool = false) async {
+        // Capture the section now — the user may navigate away mid-load, and we
+        // want the freshness stamp and the switch to agree on one target.
+        let target = section
+        if !force, let at = sectionRefreshedAt[target],
+           Date().timeIntervalSince(at) < sectionStaleAfter {
+            return
+        }
         let cli = self.cli
         isLoading = true
-        defer { isLoading = false }
-        switch section {
+        defer {
+            isLoading = false
+            sectionRefreshedAt[target] = Date()
+        }
+        switch target {
         case .dashboard:
             if let r = await background({ try cli.rows(["sites"]) }) { localSites = r }
             await loadServices()
@@ -1598,14 +1619,14 @@ final class Store: ObservableObject {
     func deployEdge(_ id: String) async {
         let cli = self.cli
         _ = await background { try cli.runRaw(["dply", "edge:deploy", id]) }
-        await refreshCurrentSection()
+        await refreshCurrentSection(force: true)
     }
 
     /// Deploy a server-hosted site.
     func deploySite(_ id: String) async {
         let cli = self.cli
         _ = await background { try cli.runRaw(["dply", "sites:deploy", id]) }
-        await refreshCurrentSection()
+        await refreshCurrentSection(force: true)
     }
 
     /// Purge an edge site's cache.
@@ -1672,9 +1693,23 @@ final class Store: ObservableObject {
     }
 
     /// Re-run every probe and publish the result to the Doctor page.
-    func refreshDoctor() async {
+    private var doctorRefreshedAt: Date?
+    /// How long a doctor report is treated as current. `dpl doctor` runs every
+    /// health probe (the most expensive command), and the Doctor/System pages
+    /// re-run it on every `didBecomeActive` — so ⌘-tabbing in and out re-probed
+    /// the machine each time. Throttle those; explicit runs still `force`.
+    private let doctorStaleAfter: TimeInterval = 30
+
+    func refreshDoctor(force: Bool = false) async {
+        if !force, let at = doctorRefreshedAt,
+           Date().timeIntervalSince(at) < doctorStaleAfter {
+            return
+        }
         doctorRunning = true
-        defer { doctorRunning = false }
+        defer {
+            doctorRunning = false
+            doctorRefreshedAt = Date()
+        }
         doctorHealth = await doctorReport()
     }
 
@@ -1717,7 +1752,7 @@ final class Store: ObservableObject {
         let cli = self.cli
         let args = Array(parts.dropFirst())
         _ = await background { try cli.runRaw(args) }
-        await refreshDoctor()
+        await refreshDoctor(force: true)
     }
 
     /// Run a `sudo …` doctor fix as root, via the authorization sheet.
@@ -1745,7 +1780,7 @@ final class Store: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
-        await refreshDoctor()
+        await refreshDoctor(force: true)
     }
 
     /// Recent request-log text for a local site.
@@ -1906,7 +1941,7 @@ final class Store: ObservableObject {
             .joined(separator: " ")
         do {
             try PrivilegedTask.run(command)
-            await refreshDoctor()
+            await refreshDoctor(force: true)
             return true
         } catch let failure as PrivilegedTask.Failure {
             if !failure.cancelled { lastError = failure.errorDescription }

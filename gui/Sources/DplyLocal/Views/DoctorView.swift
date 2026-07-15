@@ -70,7 +70,7 @@ struct DoctorPage: View {
                     countPill(report.summary.warn, .warn)
                     countPill(report.summary.pass, .pass)
                 }
-                Button { Task { await store.refreshDoctor() } } label: {
+                Button { Task { await store.refreshDoctor(force: true) } } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help("Re-run every check")
@@ -301,7 +301,7 @@ struct DoctorFixButton: View {
                     // (the sheet is modal; the CLI call is awaited), so re-run the
                     // report for either. Only a `brew install …` handed to Terminal
                     // finishes on its own schedule — and runFix doesn't await that.
-                    if let onFixed { await onFixed() } else { await store.refreshDoctor() }
+                    if let onFixed { await onFixed() } else { await store.refreshDoctor(force: true) }
                 }
                 busy = false
             }
