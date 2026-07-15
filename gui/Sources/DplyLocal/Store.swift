@@ -1051,10 +1051,22 @@ final class Store: ObservableObject {
     // MARK: Dumps (LaraDumps-style debugger)
 
     @Published var dumps: [DumpEntry] = []
-    @Published var dumpSiteFilter: String? = nil
-    @Published var dumpScreenFilter: String? = nil
-    @Published var dumpTypeFilter: String? = nil // nil=all; else category: dump/query/log/mail/job/http
-    @Published var dumpSearch: String = ""
+    @Published var dumpSiteFilter: String? = nil { didSet { if oldValue != dumpSiteFilter { recomputeDerived() } } }
+    @Published var dumpScreenFilter: String? = nil { didSet { if oldValue != dumpScreenFilter { recomputeDerived() } } }
+    // nil=all; else a category: dump/query/log/mail/job/http/…
+    @Published var dumpTypeFilter: String? = nil { didSet { if oldValue != dumpTypeFilter { recomputeDerived() } } }
+    @Published var dumpSearch: String = "" { didSet { if oldValue != dumpSearch { scheduleSearchRefilter() } } }
+
+    /// Derived views of `dumps`, recomputed only when the buffer or a filter
+    /// changes (see `recomputeDerived`) — never on every SwiftUI render, which
+    /// under a dump-heavy request meant re-filtering a 2000-entry buffer several
+    /// times per frame. The list binds to `filteredDumps`; the pickers read the
+    /// site/screen lists and the per-category counts.
+    @Published private(set) var filteredDumps: [DumpEntry] = []
+    @Published private(set) var dumpCounts: [String: Int] = [:]
+    @Published private(set) var dumpSites: [String] = []
+    @Published private(set) var dumpScreens: [String] = []
+
     /// Editor for jump-to-source: "code" | "cursor" | "phpstorm" | "subl" | "system".
     @AppStorage("dumpsEditor") var dumpsEditor: String = "code"
     /// Follow the tail of the stream. Turned off automatically when the user
@@ -1100,16 +1112,51 @@ final class Store: ObservableObject {
         // Backfill can resend ids we already have; de-dupe. A set, not a linear
         // scan — a single request can emit hundreds of query dumps at once.
         guard dumpIDs.insert(entry.id).inserted else { return }
-        dumps.append(entry)
+        pendingDumps.append(entry)
+        // A paused breakpoint is holding a live request open, so it can't wait
+        // for the coalesce tick — surface it (and the batch so far) at once.
+        if entry.pause == true, entry.token != nil {
+            pausedDump = entry
+            flushPendingDumps()
+        } else {
+            scheduleFlush()
+        }
+    }
+
+    private var dumpIDs = Set<Int>()
+    /// Dumps received but not yet published. One request can emit hundreds of
+    /// entries; appending them to `@Published dumps` one at a time would
+    /// re-render and re-filter the whole list per entry. Buffer here and flush
+    /// the burst as a single mutation instead.
+    private var pendingDumps: [DumpEntry] = []
+    private var flushScheduled = false
+
+    /// Schedule a coalesced flush of `pendingDumps` on the next tick.
+    private func scheduleFlush() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        Task { @MainActor in
+            // 50ms is imperceptible on a live tail but collapses a burst of
+            // hundreds of appends into one published update.
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            flushPendingDumps()
+        }
+    }
+
+    /// Move the buffered dumps into the published list in one mutation, trim to
+    /// `maxDumps`, and refresh the derived collections once.
+    private func flushPendingDumps() {
+        flushScheduled = false
+        guard !pendingDumps.isEmpty else { return }
+        dumps.append(contentsOf: pendingDumps)
+        pendingDumps.removeAll(keepingCapacity: true)
         let overflow = dumps.count - maxDumps
         if overflow > 0 {
             for d in dumps[..<overflow] { dumpIDs.remove(d.id) }
             dumps.removeFirst(overflow)
         }
-        if entry.pause == true, entry.token != nil { pausedDump = entry }
+        recomputeDerived()
     }
-
-    private var dumpIDs = Set<Int>()
 
     /// Resume a paused breakpoint: "continue" lets the request proceed, "stop"
     /// terminates it.
@@ -1125,38 +1172,55 @@ final class Store: ObservableObject {
     func clearDumps() async {
         dumps.removeAll()
         dumpIDs.removeAll()
+        pendingDumps.removeAll()
+        recomputeDerived()
         var req = URLRequest(url: URL(string: "http://127.0.0.1:\(dumpsPort)/dumps/clear")!)
         req.httpMethod = "POST"
         _ = try? await URLSession.shared.data(for: req)
     }
 
-    var dumpSites: [String] {
-        Array(Set(dumps.compactMap { $0.site })).sorted()
-    }
-    var dumpScreens: [String] {
-        Array(Set(dumps.compactMap { $0.screen })).sorted()
-    }
-
-    /// How many entries fall in each category, ignoring the type filter itself —
-    /// so the type picker can show counts that reflect the site/screen/search
-    /// filters currently in effect.
-    var dumpCounts: [String: Int] {
-        dumps.reduce(into: [:]) { counts, d in
-            guard passesNonTypeFilters(d) else { return }
+    /// Recompute every derived collection in a single pass over the buffer —
+    /// called when `dumps` or a filter changes, not on every render. The
+    /// site/screen lists reflect all dumps; the counts ignore the *type* filter
+    /// (so the picker shows how many of each kind survive the other filters);
+    /// `filteredDumps` applies every filter. The search text is lowercased once
+    /// here rather than once per entry.
+    private func recomputeDerived() {
+        let search = dumpSearch.lowercased()
+        var sites = Set<String>()
+        var screens = Set<String>()
+        var counts: [String: Int] = [:]
+        var filtered: [DumpEntry] = []
+        filtered.reserveCapacity(dumps.count)
+        for d in dumps {
+            if let s = d.site { sites.insert(s) }
+            if let s = d.screen { screens.insert(s) }
+            let passesNonType = (dumpSiteFilter == nil || d.site == dumpSiteFilter)
+                && (dumpScreenFilter == nil || d.screen == dumpScreenFilter)
+                && (search.isEmpty || d.searchIndex.contains(search))
+            guard passesNonType else { continue }
             counts[d.category, default: 0] += 1
+            if dumpTypeFilter == nil || d.category == dumpTypeFilter {
+                filtered.append(d)
+            }
         }
+        dumpSites = sites.sorted()
+        dumpScreens = screens.sorted()
+        dumpCounts = counts
+        filteredDumps = filtered
     }
 
-    var filteredDumps: [DumpEntry] {
-        dumps.filter { d in
-            passesNonTypeFilters(d) && (dumpTypeFilter == nil || d.category == dumpTypeFilter)
+    /// Debounce search-driven refilters — the field fires on every keystroke,
+    /// and filtering the whole buffer each time is wasteful (Mail debounces the
+    /// same way). Discrete filter picks refilter immediately via their `didSet`.
+    private var searchRefilter: Task<Void, Never>?
+    private func scheduleSearchRefilter() {
+        searchRefilter?.cancel()
+        searchRefilter = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 200_000_000) // 200ms after the last keystroke
+            guard !Task.isCancelled else { return }
+            recomputeDerived()
         }
-    }
-
-    private func passesNonTypeFilters(_ d: DumpEntry) -> Bool {
-        (dumpSiteFilter == nil || d.site == dumpSiteFilter)
-            && (dumpScreenFilter == nil || d.screen == dumpScreenFilter)
-            && (dumpSearch.isEmpty || d.searchIndex.contains(dumpSearch.lowercased()))
     }
 
     /// Remove a single entry from the local list. The daemon's ring buffer still
@@ -1164,6 +1228,7 @@ final class Store: ObservableObject {
     func hideDump(_ id: Int) {
         dumps.removeAll { $0.id == id }
         dumpIDs.remove(id)
+        recomputeDerived()
     }
 
     /// Open a dump's source file at its line in the configured editor.
