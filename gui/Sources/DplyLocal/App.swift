@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import Combine
+import Sparkle
 
 /// Entry point for the dply-local site manager.
 ///
@@ -16,6 +18,15 @@ struct DplyLocalApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = Store()
 
+    /// Sparkle self-updates. Only armed when running from a real bundle with a
+    /// feed configured — a bare `swift run` binary has no Info.plist, and
+    /// starting the updater there would just log errors.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
+
     var body: some Scene {
         Window("Dply Local", id: "main") {
             ContentView()
@@ -26,6 +37,9 @@ struct DplyLocalApp: App {
         .defaultSize(width: 1100, height: 720)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesView(updater: updaterController.updater)
+            }
             CommandGroup(after: .toolbar) {
                 Button("Refresh") { Task { await store.refreshAll() } }
                     .keyboardShortcut("r", modifiers: .command)
@@ -46,6 +60,31 @@ struct DplyLocalApp: App {
             Text(store.defaultPhp.map { "php \($0)" } ?? "php")
         }
         .menuBarExtraStyle(.menu)
+    }
+}
+
+/// "Check for Updates…" menu item, enabled/disabled by the updater's own
+/// state (Sparkle's documented SwiftUI pattern — the button must go inert
+/// while a check or install is already in flight).
+private final class CheckForUpdatesViewModel: ObservableObject {
+    @Published var canCheckForUpdates = false
+    init(updater: SPUUpdater) {
+        updater.publisher(for: \.canCheckForUpdates).assign(to: &$canCheckForUpdates)
+    }
+}
+
+struct CheckForUpdatesView: View {
+    @ObservedObject private var model: CheckForUpdatesViewModel
+    private let updater: SPUUpdater
+
+    init(updater: SPUUpdater) {
+        self.updater = updater
+        self.model = CheckForUpdatesViewModel(updater: updater)
+    }
+
+    var body: some View {
+        Button("Check for Updates…") { updater.checkForUpdates() }
+            .disabled(!model.canCheckForUpdates)
     }
 }
 

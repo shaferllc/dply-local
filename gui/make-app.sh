@@ -18,6 +18,12 @@ done
 echo "› Building release binary…"
 swift build -c release
 
+# One source of truth for the version: the workspace Cargo.toml. Sparkle
+# compares CFBundleVersion between the running app and the appcast, so the
+# app, the tag, and the appcast must all agree on this string.
+VERSION=$(grep -m1 '^version' ../Cargo.toml | cut -d'"' -f2)
+echo "› Version $VERSION (from Cargo.toml)"
+
 # Generate the icon if missing or older than its generator.
 if [ ! -f AppIcon.icns ] || [ make-icon.swift -nt AppIcon.icns ]; then
   echo "› Generating AppIcon.icns…"
@@ -27,12 +33,16 @@ fi
 APP="$HOME/Desktop/DplyLocal.app"
 echo "› Assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 
 cp .build/release/DplyLocal "$APP/Contents/MacOS/DplyLocal"
 cp AppIcon.icns             "$APP/Contents/Resources/AppIcon.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# Sparkle rides in Contents/Frameworks; the binary's rpath
+# (@executable_path/../Frameworks, set in Package.swift) finds it there.
+cp -R .build/release/Sparkle.framework "$APP/Contents/Frameworks/"
+
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -40,8 +50,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>                 <string>DplyLocal</string>
     <key>CFBundleDisplayName</key>          <string>Dply Local</string>
     <key>CFBundleIdentifier</key>           <string>com.tomshafer.dplylocal</string>
-    <key>CFBundleVersion</key>              <string>5</string>
-    <key>CFBundleShortVersionString</key>   <string>0.4</string>
+    <key>CFBundleVersion</key>              <string>${VERSION}</string>
+    <key>CFBundleShortVersionString</key>   <string>${VERSION}</string>
     <key>CFBundleExecutable</key>           <string>DplyLocal</string>
     <key>CFBundlePackageType</key>          <string>APPL</string>
     <key>CFBundleSupportedPlatforms</key>   <array><string>MacOSX</string></array>
@@ -50,6 +60,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key>       <string>14.0</string>
     <key>NSHighResolutionCapable</key>      <true/>
     <key>NSHumanReadableCopyright</key>     <string>© 2026 Tom Shafer</string>
+    <!-- Sparkle self-updates: the feed is an asset on the latest GitHub
+         Release; updates are EdDSA-signed in CI (release.yml). -->
+    <key>SUFeedURL</key>                    <string>https://github.com/shaferllc/dply-local/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>                <string>u0R+xh/MzqvsEHAtfH6BV5OuqAU022QuO4KhtGVoZKQ=</string>
+    <key>SUEnableAutomaticChecks</key>      <true/>
+    <key>SUScheduledCheckInterval</key>     <integer>86400</integer>
 </dict>
 </plist>
 PLIST

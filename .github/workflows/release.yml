@@ -34,8 +34,55 @@ jobs:
           hdiutil create -volname "Dply Local" -srcfolder "$STAGE" \
             -ov -format UDZO DplyLocal.dmg
 
+      # Sparkle self-updates: sign the DMG with the project's EdDSA key and
+      # emit an appcast the app's SUFeedURL points at
+      # (releases/latest/download/appcast.xml always redirects to the newest
+      # release's copy, so publishing it per-release IS the feed update).
+      - name: Sign the update and build the appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "::error::SPARKLE_ED_PRIVATE_KEY secret is not set — updates must be EdDSA-signed (generate_keys -x, then gh secret set)."
+            exit 1
+          fi
+          SPARKLE_VER=2.9.4
+          curl -sL -o sparkle.tar.xz "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VER}/Sparkle-${SPARKLE_VER}.tar.xz"
+          mkdir sparkle-dist && tar -xf sparkle.tar.xz -C sparkle-dist
+
+          umask 077
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > ed_key
+          SIG=$(./sparkle-dist/bin/sign_update --ed-key-file ed_key DplyLocal.dmg)
+          rm -f ed_key
+          echo "signature attrs: $SIG"
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > appcast.xml <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>Dply Local</title>
+              <item>
+                <title>Version ${VERSION}</title>
+                <sparkle:version>${VERSION}</sparkle:version>
+                <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+                <link>https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}</link>
+                <pubDate>$(date -u +"%a, %d %b %Y %H:%M:%S +0000")</pubDate>
+                <enclosure
+                  url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/DplyLocal.dmg"
+                  type="application/octet-stream"
+                  ${SIG} />
+              </item>
+            </channel>
+          </rss>
+          XML
+          head -3 appcast.xml
+
       - name: Publish to the release
         uses: softprops/action-gh-release@v2
         with:
-          files: DplyLocal.dmg
+          files: |
+            DplyLocal.dmg
+            appcast.xml
           fail_on_unmatched_files: true
