@@ -865,8 +865,27 @@ fn connection_strings(engine: &str, port: u16) -> (String, String) {
 }
 
 /// Run a `dpl db` operation (optionally against a specific instance port).
-pub fn db(home: Option<&str>, action: String, engine: String, name: Option<String>, port: Option<u16>, file: Option<String>) -> Result<()> {
-    match daemon::call(Request::Db { action: action.clone(), engine, name, port, file }, home)? {
+/// The branch-aware actions (attach/detach/switch/branches/drop-branch) take a
+/// *site* where the classic ones take a database, and speak their own request.
+#[allow(clippy::too_many_arguments)]
+pub fn db(
+    home: Option<&str>,
+    action: String,
+    engine: String,
+    name: Option<String>,
+    branch: Option<String>,
+    port: Option<u16>,
+    file: Option<String>,
+    database: Option<String>,
+) -> Result<()> {
+    const BRANCH_ACTIONS: [&str; 5] = ["attach", "detach", "switch", "branches", "drop-branch"];
+    let request = if BRANCH_ACTIONS.contains(&action.as_str()) {
+        let site = name.context("usage: dpl db <attach|detach|switch|branches|drop-branch> <site> [branch]")?;
+        Request::BranchDb { action: action.clone(), site, branch, database, port }
+    } else {
+        Request::Db { action: action.clone(), engine, name, port, file }
+    };
+    match daemon::call(request, home)? {
         Response::Lines { lines } => {
             if lines.is_empty() {
                 println!("(no databases)");

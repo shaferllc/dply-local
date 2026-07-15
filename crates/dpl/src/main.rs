@@ -152,8 +152,8 @@ fn run() -> Result<()> {
         Command::Service { action, name, engine, version, port } => {
             commands::local::service(home.as_deref(), action, name, engine, version, port, args.json)
         }
-        Command::Db { action, name, engine, port, file } => {
-            commands::local::db(home.as_deref(), action, engine, name, port, file)
+        Command::Db { action, name, branch, engine, port, file, database } => {
+            commands::local::db(home.as_deref(), action, engine, name, branch, port, file, database)
         }
         Command::Mail { command } => {
             use cli::MailCmd;

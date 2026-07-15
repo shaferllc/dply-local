@@ -244,10 +244,13 @@ pub enum Command {
     },
     /// Manage databases on a running service/instance.
     Db {
-        /// One of: list, create, drop, backup, restore.
+        /// list|create|drop|backup|restore <db>, or the branch-aware family:
+        /// attach|detach|switch|branches|drop-branch <site> [branch].
         action: String,
-        /// Database name (for create/drop/backup/restore).
+        /// Database name (create/drop/backup/restore) or site name (branch family).
         name: Option<String>,
+        /// Branch for `switch` (default: the checked-out branch) / `drop-branch`.
+        branch: Option<String>,
         /// Engine: mysql or postgres.
         #[arg(long, default_value = "postgres")]
         engine: String,
@@ -257,6 +260,9 @@ pub enum Command {
         /// Dump file for backup (out, default ~/.dpl/backups) / restore (in).
         #[arg(long)]
         file: Option<String>,
+        /// Base database for `attach` (default: the project's .env DB_DATABASE).
+        #[arg(long)]
+        database: Option<String>,
     },
     /// Inspect captured local mail.
     Mail {
