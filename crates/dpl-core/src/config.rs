@@ -157,6 +157,15 @@ pub struct Link {
     /// None = share the common master. See `dpl preload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preload: Option<PathBuf>,
+    /// Base database name for branch-aware databases (Postgres). When set, this
+    /// database always holds the checked-out branch's data and other branches
+    /// are parked as `<database>@<branch>`. None = feature off. See `dpl db attach`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    /// Which git branch's data currently occupies `database`. Maintained by the
+    /// daemon on every switch; meaningless when `database` is None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_branch: Option<String>,
 }
 
 impl LocalConfig {

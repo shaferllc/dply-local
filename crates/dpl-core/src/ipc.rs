@@ -122,6 +122,21 @@ pub enum Request {
     },
     /// Manage the TLDs sites answer on. `action` ∈ list|add|remove.
     Tld { action: String, name: Option<String> },
+    /// Branch-aware databases for a linked site (Postgres).
+    /// `action` ∈ attach|detach|switch|branches|drop-branch.
+    /// `branch`: target for switch (defaults to the checked-out branch) or the
+    /// branch to drop. `database`: base DB name for attach (defaults to the
+    /// project's `.env` `DB_DATABASE`). `port`: instance port (default 5432).
+    BranchDb {
+        action: String,
+        site: String,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        database: Option<String>,
+        #[serde(default)]
+        port: Option<u16>,
+    },
 
     /// Any op this build doesn't understand (peer is newer).
     #[serde(other)]

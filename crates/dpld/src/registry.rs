@@ -434,6 +434,8 @@ impl Registry {
                 xdebug: None,
                 profile: false,
                 preload: None,
+                database: None,
+                db_branch: None,
             },
         );
         self.save()?;
@@ -469,7 +471,7 @@ impl Registry {
             let Ok(path) = canonicalize(path) else { continue };
             self.config.links.insert(
                 name.to_lowercase(),
-                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None, profile: false, preload: None },
+                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None, profile: false, preload: None, database: None, db_branch: None },
             );
             linked_ok += 1;
         }
@@ -824,6 +826,33 @@ impl Registry {
                 Ok(format!("Preload off for {name}.test — it folds back into the shared master."))
             }
         }
+    }
+
+    /// A linked site's branch-DB state: (project path, base database, live branch).
+    /// The database/branch are None until `dpl db attach`.
+    pub fn branch_db_state(&self, site: &str) -> Result<(PathBuf, Option<String>, Option<String>)> {
+        let site = site.to_lowercase();
+        let link = self
+            .config
+            .links
+            .get(&site)
+            .with_context(|| format!("{site} is not linked (branch databases apply to linked sites)"))?;
+        Ok((link.path.clone(), link.database.clone(), link.db_branch.clone()))
+    }
+
+    /// Persist a site's branch-DB config: the base database name and the branch
+    /// currently live in it. `None`/`None` detaches. No reconcile — the database
+    /// mapping doesn't affect how the site is served.
+    pub fn set_branch_db(&mut self, site: &str, database: Option<String>, branch: Option<String>) -> Result<()> {
+        let site = site.to_lowercase();
+        let link = self
+            .config
+            .links
+            .get_mut(&site)
+            .with_context(|| format!("{site} is not linked"))?;
+        link.database = database;
+        link.db_branch = branch;
+        self.save()
     }
 
     pub fn set_secure(&mut self, name: &str, secure: bool) -> Result<String> {

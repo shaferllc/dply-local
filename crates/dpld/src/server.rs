@@ -244,9 +244,147 @@ async fn dispatch(
                 Err(e) => Response::Error { message: format!("{e:#}") },
             }
         }
+        Request::BranchDb { action, site, branch, database, port } => {
+            branch_db(state, &action, &site, branch, database, port).await
+        }
         Request::Unknown => Response::Error {
             message: "unknown operation (client is newer than daemon?)".into(),
         },
+    }
+}
+
+/// Branch-aware databases: orchestrate registry state + Postgres operations.
+///
+/// The registry lock is held only for the config read/write, never across the
+/// database work — a first-visit template copy takes seconds and every request
+/// routes through that lock.
+async fn branch_db(
+    state: &DaemonState,
+    action: &str,
+    site: &str,
+    branch: Option<String>,
+    database: Option<String>,
+    port: Option<u16>,
+) -> Response {
+    use crate::services::{pg_branch_drop, pg_branch_list, pg_branch_switch, pg_db_size, pg_ensure_db};
+
+    let err = |m: String| Response::Error { message: m };
+    let port = port.unwrap_or(5432);
+
+    // Read the link's state up front (and release the lock).
+    let (path, db, live) = {
+        let reg = state.registry.lock().await;
+        match reg.branch_db_state(site) {
+            Ok(s) => s,
+            Err(e) => return err(format!("{e:#}")),
+        }
+    };
+
+    if !crate::services::port_open(port) {
+        return err(format!("nothing is listening on Postgres port {port} — start it (or DBngin) first."));
+    }
+
+    // Blocking psql work happens off the async runtime.
+    let blocking = |f: Box<dyn FnOnce() -> anyhow::Result<String> + Send>| async {
+        tokio::task::spawn_blocking(f).await.map_err(anyhow::Error::from).and_then(|r| r)
+    };
+
+    match action {
+        "attach" => {
+            let db = match database.or_else(|| dpl_core::branchdb::env_database(&path)) {
+                Some(d) => d,
+                None => return err(format!(
+                    "couldn't find DB_DATABASE in {}/.env — pass one with --database", path.display())),
+            };
+            let on_branch = match dpl_core::branchdb::git_branch(&path) {
+                Some(b) => b,
+                None => return err(format!("{} isn't on a git branch (branch databases follow git)", path.display())),
+            };
+            let db2 = db.clone();
+            let created = match blocking(Box::new(move || pg_ensure_db(port, &db2).map(|c| c.to_string()))).await {
+                Ok(c) => c == "true",
+                Err(e) => return err(format!("{e:#}")),
+            };
+            let mut reg = state.registry.lock().await;
+            if let Err(e) = reg.set_branch_db(site, Some(db.clone()), Some(on_branch.clone())) {
+                return err(format!("{e:#}"));
+            }
+            Response::Message { text: format!(
+                "Branch databases on for {site}: `{db}`{} now tracks git branch `{on_branch}`. \
+                 Switch with `dpl db switch {site}` after a checkout.",
+                if created { " (created)" } else { "" }
+            )}
+        }
+        "detach" => {
+            if db.is_none() {
+                return err(format!("{site} has no branch database attached."));
+            }
+            let mut reg = state.registry.lock().await;
+            if let Err(e) = reg.set_branch_db(site, None, None) {
+                return err(format!("{e:#}"));
+            }
+            Response::Message { text: format!(
+                "Branch databases off for {site}. Parked `<db>@<branch>` databases were kept — \
+                 drop them with `dpl db drop <name>` if you're done with them."
+            )}
+        }
+        "switch" => {
+            let Some(db) = db else {
+                return err(format!("{site} has no branch database attached — run `dpl db attach {site}` first."));
+            };
+            let to = match branch.or_else(|| dpl_core::branchdb::git_branch(&path)) {
+                Some(b) => b,
+                None => return err(format!("{} isn't on a git branch — pass one explicitly", path.display())),
+            };
+            let Some(from) = live else {
+                return err(format!("no live branch recorded for {site} — re-run `dpl db attach {site}`."));
+            };
+            if from == to {
+                return Response::Message { text: format!("`{db}` already tracks `{to}`.") };
+            }
+            let (db2, from2, to2) = (db.clone(), from.clone(), to.clone());
+            let msg = match blocking(Box::new(move || pg_branch_switch(port, &db2, &from2, &to2))).await {
+                Ok(m) => m,
+                Err(e) => return err(format!("{e:#}")),
+            };
+            let mut reg = state.registry.lock().await;
+            if let Err(e) = reg.set_branch_db(site, Some(db), Some(to)) {
+                return err(format!("switched, but couldn't record it: {e:#}"));
+            }
+            Response::Message { text: msg }
+        }
+        "branches" => {
+            let Some(db) = db else {
+                return err(format!("{site} has no branch database attached."));
+            };
+            let live = live.unwrap_or_else(|| "?".into());
+            let (db2, db3) = (db.clone(), db.clone());
+            let live_size = blocking(Box::new(move || pg_db_size(port, &db2))).await.unwrap_or_else(|_| "?".into());
+            let parked = match tokio::task::spawn_blocking(move || pg_branch_list(port, &db3)).await {
+                Ok(Ok(lines)) => lines,
+                Ok(Err(e)) => return err(format!("{e:#}")),
+                Err(e) => return err(format!("{e:#}")),
+            };
+            let mut lines = vec![format!("* {live}\t{live_size}\tlive in `{db}`")];
+            lines.extend(parked.into_iter().map(|l| format!("  {l}\tparked")));
+            Response::Lines { lines }
+        }
+        "drop-branch" => {
+            let Some(db) = db else {
+                return err(format!("{site} has no branch database attached."));
+            };
+            let Some(target) = branch else {
+                return err("usage: dpl db drop-branch <site> <branch>".into());
+            };
+            if live.as_deref() == Some(target.as_str()) {
+                return err(format!("`{target}` is the live branch in `{db}` — switch away before dropping it."));
+            }
+            match blocking(Box::new(move || pg_branch_drop(port, &db, &target))).await {
+                Ok(m) => Response::Message { text: m },
+                Err(e) => err(format!("{e:#}")),
+            }
+        }
+        other => err(format!("unknown branch-db action: {other}")),
     }
 }
 

@@ -329,7 +329,7 @@ impl Services {
 
 // ---- binary discovery ----
 
-fn port_open(port: u16) -> bool {
+pub(crate) fn port_open(port: u16) -> bool {
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(250)).is_ok()
@@ -602,6 +602,141 @@ fn db_restore(engine: Engine, port: u16, db: &str, file: &str) -> Result<String>
         bail!("{tool} restore failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(format!("Restored `{db}` from {file}."))
+}
+
+// ---- branch-aware databases (Postgres) ----
+//
+// The scheme (see dpl_core::branchdb): the base database always holds the
+// checked-out branch's data; other branches are parked as `<base>@<branch>`.
+// A switch is two catalog renames (~100ms); only a branch's first visit pays
+// a `CREATE DATABASE ... TEMPLATE` copy (~2.5s per 250MB, measured).
+
+/// Run one SQL statement against the maintenance DB, returning stdout.
+fn pg_admin(port: u16, sql: &str) -> Result<String> {
+    let psql = client(Engine::Postgres, "psql")?;
+    let out = std::process::Command::new(&psql)
+        .args(["-h", "127.0.0.1", "-p", &port.to_string(), "-U", "postgres",
+               "-v", "ON_ERROR_STOP=1", "-d", "postgres", "-Atc", sql])
+        .output()
+        .with_context(|| format!("running {}", psql.display()))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        bail!("psql failed: {}", String::from_utf8_lossy(&out.stderr).trim())
+    }
+}
+
+fn pg_db_exists(port: u16, name: &str) -> Result<bool> {
+    Ok(pg_admin(port, &format!("SELECT 1 FROM pg_database WHERE datname = '{name}'"))? == "1")
+}
+
+/// Kick every session off a database so it can be renamed or templated.
+/// In a dev environment this is safe: php-fpm reconnects on the next request.
+fn pg_terminate(port: u16, name: &str) -> Result<()> {
+    pg_admin(port, &format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = '{name}' AND pid <> pg_backend_pid()"
+    ))?;
+    Ok(())
+}
+
+/// Guard every name headed into SQL. All callers pass through here.
+fn pg_ident(name: &str) -> Result<&str> {
+    if dpl_core::branchdb::safe_identifier(name) {
+        Ok(name)
+    } else {
+        bail!("unusable database identifier: {name}")
+    }
+}
+
+/// Ensure the base database exists (for attach). Returns true if created.
+pub fn pg_ensure_db(port: u16, base: &str) -> Result<bool> {
+    let base = pg_ident(base)?;
+    if pg_db_exists(port, base)? {
+        return Ok(false);
+    }
+    pg_admin(port, &format!("CREATE DATABASE \"{base}\""))?;
+    Ok(true)
+}
+
+/// Move the live database from branch `from` to branch `to`.
+///
+/// The base is renamed to park `from`'s data; `to`'s parked data is renamed
+/// into place when it exists, else cloned from `from` (a new branch starts
+/// from the state you left — matching how the code diverged).
+pub fn pg_branch_switch(port: u16, base: &str, from: &str, to: &str) -> Result<String> {
+    let base = pg_ident(base)?;
+    let park_from = dpl_core::branchdb::branch_db_name(base, from);
+    let park_to = dpl_core::branchdb::branch_db_name(base, to);
+    let (park_from, park_to) = (pg_ident(&park_from)?, pg_ident(&park_to)?);
+
+    if !pg_db_exists(port, base)? {
+        bail!("database `{base}` does not exist — create it (or run migrations) first");
+    }
+
+    // Park the live data under its branch. A parked copy of `from` can already
+    // exist after an interrupted switch; the live base is the fresher truth.
+    pg_terminate(port, base)?;
+    if pg_db_exists(port, park_from)? {
+        pg_admin(port, &format!("DROP DATABASE \"{park_from}\""))?;
+    }
+    pg_admin(port, &format!("ALTER DATABASE \"{base}\" RENAME TO \"{park_from}\""))?;
+
+    // Bring `to`'s data live: instant rename when the branch was visited
+    // before, one-time template copy when it's new.
+    let created = if pg_db_exists(port, park_to)? {
+        pg_terminate(port, park_to)?;
+        pg_admin(port, &format!("ALTER DATABASE \"{park_to}\" RENAME TO \"{base}\""))?;
+        false
+    } else {
+        pg_admin(port, &format!("CREATE DATABASE \"{base}\" TEMPLATE \"{park_from}\""))?;
+        true
+    };
+
+    Ok(if created {
+        format!("`{base}` now tracks `{to}` (new branch — cloned from `{from}`).")
+    } else {
+        format!("`{base}` now tracks `{to}` (swapped, `{from}` parked).")
+    })
+}
+
+/// Parked branch databases for a base, as `branch<TAB>size` lines.
+pub fn pg_branch_list(port: u16, base: &str) -> Result<Vec<String>> {
+    let base = pg_ident(base)?;
+    // Escape LIKE wildcards in the base name (`my_app` contains `_`).
+    let pattern = base.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let out = pg_admin(port, &format!(
+        "SELECT datname || E'\\t' || pg_size_pretty(pg_database_size(datname)) \
+         FROM pg_database WHERE datname LIKE '{pattern}@%' ESCAPE '\\' ORDER BY datname"
+    ))?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let (db, size) = l.split_once('\t')?;
+            let branch = dpl_core::branchdb::branch_of_db(base, db)?;
+            Some(format!("{branch}\t{size}"))
+        })
+        .collect())
+}
+
+/// Drop one parked branch database. Refuses the live base by construction
+/// (only `<base>@<branch>` names are ever dropped).
+pub fn pg_branch_drop(port: u16, base: &str, branch: &str) -> Result<String> {
+    let base = pg_ident(base)?;
+    let park = dpl_core::branchdb::branch_db_name(base, branch);
+    let park = pg_ident(&park)?;
+    if !pg_db_exists(port, park)? {
+        return Ok(format!("no parked database for branch `{branch}`."));
+    }
+    pg_terminate(port, park)?;
+    pg_admin(port, &format!("DROP DATABASE \"{park}\""))?;
+    Ok(format!("Dropped parked database for `{branch}`."))
+}
+
+/// The size of one database, human-formatted (for `branches` output).
+pub fn pg_db_size(port: u16, name: &str) -> Result<String> {
+    let name = pg_ident(name)?;
+    pg_admin(port, &format!("SELECT pg_size_pretty(pg_database_size('{name}'))"))
 }
 
 fn client(engine: Engine, tool: &str) -> Result<PathBuf> {

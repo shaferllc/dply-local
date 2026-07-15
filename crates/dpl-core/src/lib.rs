@@ -6,6 +6,7 @@
 //! Nothing here needs privilege or the network — it is the vocabulary the
 //! rest of the workspace speaks.
 
+pub mod branchdb;
 pub mod config;
 pub mod error;
 pub mod ipc;
