@@ -88,12 +88,19 @@ struct Row: Identifiable, Hashable {
 
     /// Follow a dotted path (`build.framework`) through nested objects.
     func dig(_ path: String) -> JSONValue? {
-        var current: JSONValue = .object(fields)
+        // Fast path: almost every lookup is a single key (`name`, `host`, …),
+        // and the site list runs hundreds of these per render. Skip wrapping the
+        // whole dict in a `.object` enum and splitting the string for those.
+        // (An empty path split to zero segments and yielded the whole object;
+        // preserve that even though nothing relies on it.)
+        if path.isEmpty { return .object(fields) }
+        if !path.contains(".") { return fields[path] }
+        var obj = fields
+        var current: JSONValue?
         for segment in path.split(separator: ".") {
-            guard let obj = current.objectValue, let next = obj[String(segment)] else {
-                return nil
-            }
+            guard let next = obj[String(segment)] else { return nil }
             current = next
+            obj = next.objectValue ?? [:]
         }
         return current
     }

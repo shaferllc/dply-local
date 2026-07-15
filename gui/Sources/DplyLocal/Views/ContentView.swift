@@ -12,6 +12,9 @@ struct ContentView: View {
     @State private var showLinkSheet = false
     @State private var pendingLinkPath = ""
     @State private var siteSearch = ""
+    /// `siteSearch` debounced — what `filteredLocalSites` actually filters on, so
+    /// a burst of keystrokes doesn't re-filter ~120 sites on each one.
+    @State private var debouncedSiteSearch = ""
     @AppStorage("didOnboard") private var didOnboard = false
 
     var body: some View {
@@ -180,6 +183,15 @@ struct ContentView: View {
                 }
             }
             .searchable(text: $siteSearch, placement: .automatic, prompt: "Filter domains")
+            .task(id: siteSearch) {
+                // Debounce: clearing is instant; typing settles after a short
+                // pause. `.task(id:)` cancels + restarts on each change, so only
+                // the last keystroke's task survives the sleep to commit.
+                if siteSearch.isEmpty { debouncedSiteSearch = ""; return }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard !Task.isCancelled else { return }
+                debouncedSiteSearch = siteSearch
+            }
             .overlay { if store.isLoading { ProgressView().controlSize(.small) } }
         case .services:
             ServicesListView(selection: $selection)
@@ -224,11 +236,11 @@ struct ContentView: View {
 
     /// Local sites filtered by the search box (name / host / project type).
     private var filteredLocalSites: [Row] {
-        guard !siteSearch.isEmpty else { return store.localSites }
+        guard !debouncedSiteSearch.isEmpty else { return store.localSites }
         return store.localSites.filter {
-            $0.cell(["name"]).localizedCaseInsensitiveContains(siteSearch)
-                || $0.cell(["host"]).localizedCaseInsensitiveContains(siteSearch)
-                || $0.cell(["framework"]).localizedCaseInsensitiveContains(siteSearch)
+            $0.cell(["name"]).localizedCaseInsensitiveContains(debouncedSiteSearch)
+                || $0.cell(["host"]).localizedCaseInsensitiveContains(debouncedSiteSearch)
+                || $0.cell(["framework"]).localizedCaseInsensitiveContains(debouncedSiteSearch)
         }
     }
 
