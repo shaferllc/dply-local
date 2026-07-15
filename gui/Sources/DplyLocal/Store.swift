@@ -176,6 +176,37 @@ struct ValetSnapshot {
     var linked: [ValetSite] = []
 }
 
+/// User-authored notes pinned to a site: what it is, what's left to do, and
+/// where it lives beyond this machine. This is app-local metadata — `dpl` knows
+/// nothing about it — so it's persisted per-site in UserDefaults, keyed by the
+/// site name (the same scheme `ParitySheet` uses for its remote).
+struct SiteProject: Codable, Equatable {
+    /// One checklist item.
+    struct Todo: Codable, Equatable, Identifiable {
+        var id = UUID()
+        var text: String
+        var done = false
+    }
+
+    /// What the site is about — a short free-text description.
+    var summary = ""
+    /// Where this project lives in production, if anywhere.
+    var productionURL = ""
+    /// A staging / testing URL, if the project has one.
+    var testingURL = ""
+    var todos: [Todo] = []
+
+    /// Nothing worth surfacing yet — used to keep the section quiet until the
+    /// user has actually written something.
+    var isEmpty: Bool {
+        summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && productionURL.isEmpty && testingURL.isEmpty && todos.isEmpty
+    }
+
+    /// Open to-do count, for a badge on the section header.
+    var openTodos: Int { todos.filter { !$0.done }.count }
+}
+
 /// Run an executable and capture stdout (off the main actor). Used to query
 /// the active PHP binary for its config.
 func runProcess(_ exe: String, _ args: [String]) -> String {
@@ -876,6 +907,49 @@ final class Store: ObservableObject {
         let cli = self.cli
         _ = await background { try cli.runRaw(["node", "detect", name]) }
         await loadLocal()
+    }
+
+    // MARK: Site project notes
+
+    /// Notes live inside the project itself — `<project>/.dpl/project.json` — so
+    /// they travel with the repo and can be committed and shared, rather than
+    /// being stranded in this Mac's preferences. `path` is the site's project dir.
+    private func projectFile(_ path: String) -> URL {
+        URL(fileURLWithPath: path, isDirectory: true)
+            .appendingPathComponent(".dpl", isDirectory: true)
+            .appendingPathComponent("project.json")
+    }
+
+    /// The user's notes for the project at `path` — its summary, to-dos, and
+    /// external URLs. A missing or unreadable file decodes to an empty project.
+    func project(atPath path: String) -> SiteProject {
+        guard !path.isEmpty,
+              let data = try? Data(contentsOf: projectFile(path)),
+              let project = try? JSONDecoder().decode(SiteProject.self, from: data)
+        else { return SiteProject() }
+        return project
+    }
+
+    /// Persist a project's notes, pretty-printed so the file reads well in a
+    /// diff. An empty project deletes the file (and prunes an empty `.dpl` dir)
+    /// rather than committing a blank record.
+    func setProject(_ project: SiteProject, atPath path: String) {
+        guard !path.isEmpty else { return }
+        let file = projectFile(path)
+        let fm = FileManager.default
+        if project.isEmpty {
+            try? fm.removeItem(at: file)
+            let dir = file.deletingLastPathComponent()
+            if let contents = try? fm.contentsOfDirectory(atPath: dir.path), contents.isEmpty {
+                try? fm.removeItem(at: dir)
+            }
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(project) else { return }
+        try? fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: file, options: .atomic)
     }
 
     // MARK: Services / PHP / Mail / TLD actions

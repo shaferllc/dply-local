@@ -390,6 +390,8 @@ struct LocalDetailView: View {
                     ])
                 }
 
+                SiteProjectSection(projectPath: site.cell(["path"])).environmentObject(store)
+
                 if !isProxy {
                     xdebugSection
                     profilerSection
@@ -515,5 +517,155 @@ struct LocalDetailView: View {
         Task { await store.addTld(t) }
         showAddTld = false
         newTld = ""
+    }
+}
+
+/// A per-site scratchpad: what the site is about, its production and testing
+/// URLs, and a to-do checklist. The notes are stored inside the project folder
+/// (`<project>/.dpl/project.json`) so they travel with the repo — loaded from
+/// and saved to the Store's `SiteProject` on every edit.
+struct SiteProjectSection: View {
+    @EnvironmentObject var store: Store
+    /// The site's project directory — where the notes file lives.
+    let projectPath: String
+
+    @State private var project = SiteProject()
+    @State private var newTodo = ""
+    /// Guards the save-on-change from firing during the initial load.
+    @State private var loaded = false
+
+    var body: some View {
+        DetailSection(title: "Project") {
+            VStack(alignment: .leading, spacing: 14) {
+                summaryField
+                HStack(alignment: .top, spacing: 12) {
+                    urlField(title: "Production", text: $project.productionURL,
+                             placeholder: "https://example.com")
+                    urlField(title: "Testing", text: $project.testingURL,
+                             placeholder: "https://staging.example.com")
+                }
+                todoList
+            }
+        }
+        // Reload when navigating between sites (the view is reused).
+        .task(id: projectPath) {
+            loaded = false
+            project = store.project(atPath: projectPath)
+            loaded = true
+        }
+        .onChange(of: project) { _, updated in
+            guard loaded else { return }
+            store.setProject(updated, atPath: projectPath)
+        }
+    }
+
+    // MARK: About
+
+    private var summaryField: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("About").font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $project.summary)
+                .font(.callout)
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: 52)
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
+                .overlay(alignment: .topLeading) {
+                    if project.summary.isEmpty {
+                        Text("What is this site about?")
+                            .font(.callout).foregroundStyle(.tertiary)
+                            .padding(.horizontal, 11).padding(.vertical, 14)
+                            .allowsHitTesting(false)
+                    }
+                }
+        }
+    }
+
+    // MARK: URLs
+
+    private func urlField(title: String, text: Binding<String>, placeholder: String) -> some View {
+        let trimmed = text.wrappedValue.trimmingCharacters(in: .whitespaces)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                TextField(placeholder, text: text)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.callout)
+                Button {
+                    store.openURL(normalizedURL(trimmed))
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                }
+                .buttonStyle(.borderless)
+                .disabled(trimmed.isEmpty)
+                .help("Open \(title.lowercased()) URL")
+            }
+        }
+    }
+
+    /// Let the user type `example.com` and still get a working link.
+    private func normalizedURL(_ raw: String) -> String {
+        guard !raw.isEmpty else { return raw }
+        if raw.contains("://") { return raw }
+        return "https://" + raw
+    }
+
+    // MARK: To-dos
+
+    private var todoList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("To do").font(.caption).foregroundStyle(.secondary)
+                if project.openTodos > 0 {
+                    Text("\(project.openTodos)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(Theme.violet))
+                }
+            }
+
+            ForEach($project.todos) { $todo in
+                HStack(spacing: 8) {
+                    Button {
+                        todo.done.toggle()
+                    } label: {
+                        Image(systemName: todo.done ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(todo.done ? Theme.live : .secondary)
+                    }
+                    .buttonStyle(.borderless)
+
+                    TextField("", text: $todo.text)
+                        .textFieldStyle(.plain)
+                        .font(.callout)
+                        .foregroundStyle(todo.done ? .secondary : .primary)
+                        .strikethrough(todo.done, color: .secondary)
+
+                    Button {
+                        project.todos.removeAll { $0.id == todo.id }
+                    } label: {
+                        Image(systemName: "xmark").font(.caption2)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.tertiary)
+                    .help("Remove")
+                }
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "plus.circle").foregroundStyle(.secondary)
+                TextField("Add a task…", text: $newTodo)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                    .onSubmit(addTodo)
+            }
+        }
+    }
+
+    private func addTodo() {
+        let text = newTodo.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        project.todos.append(SiteProject.Todo(text: text))
+        newTodo = ""
     }
 }
