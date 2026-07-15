@@ -10,7 +10,7 @@ Ship the DMG with a Developer ID signature and Apple notarization. Today the app
 is ad-hoc signed, so Gatekeeper blocks it on first open and setup has to use a
 per-run authorization sheet. With a real identity, setup can move to
 `SMAppService` — a resident privileged helper approved once in System Settings —
-instead of prompting on every `dpl setup`. **Blocks #2.**
+instead of prompting on every `dpl setup`. (No longer blocks #2 — Sparkle shipped on EdDSA.)
 
 ### 2. ✅ Self-updating app (Sparkle) — shipped
 Sparkle 2 checks `releases/latest/download/appcast.xml` daily and updates in
