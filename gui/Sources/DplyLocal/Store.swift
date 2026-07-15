@@ -930,6 +930,55 @@ final class Store: ObservableObject {
         await loadLocal()
     }
 
+    // MARK: Branch-aware databases
+
+    /// One row of `dpl db branches <site>`: a branch, its database size, and
+    /// whether it's the one currently live in the base database.
+    struct DbBranch: Identifiable, Equatable {
+        let branch: String
+        let size: String
+        let live: Bool
+        var id: String { branch }
+    }
+
+    /// Attach branch-aware databases to a site (DB name read from its .env).
+    func attachBranchDb(name: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["db", "attach", name]) }
+        await loadLocal()
+    }
+
+    /// Detach — parked `<db>@<branch>` databases are kept.
+    func detachBranchDb(name: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["db", "detach", name]) }
+        await loadLocal()
+    }
+
+    /// Drop one parked branch database.
+    func dropDbBranch(name: String, branch: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["db", "drop-branch", name, branch]) }
+    }
+
+    /// Live + parked branches for a site, from `dpl db branches` (plain lines:
+    /// `* <branch>\t<size>\tlive in ...` / `  <branch>\t<size>\tparked`).
+    func dbBranches(name: String) async -> [DbBranch] {
+        let cli = self.cli
+        guard let data = await backgroundQuiet({ try cli.runRaw(["db", "branches", name]) }) else { return [] }
+        return String(decoding: data, as: UTF8.self)
+            .split(separator: "\n")
+            .compactMap { line in
+                let live = line.hasPrefix("*")
+                let parts = line.dropFirst(live ? 1 : 0)
+                    .trimmingCharacters(in: .whitespaces)
+                    .split(separator: "\t", omittingEmptySubsequences: false)
+                guard let branch = parts.first, !branch.isEmpty else { return nil }
+                let size = parts.count > 1 ? String(parts[1]) : ""
+                return DbBranch(branch: String(branch), size: size, live: live)
+            }
+    }
+
     // MARK: Site project notes
 
     /// Notes live inside the project itself — `<project>/.dpl/project.json` — so

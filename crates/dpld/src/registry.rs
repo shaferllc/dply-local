@@ -197,12 +197,13 @@ impl Registry {
                     None => dpl_core::node::read_pin(&s.path),
                 };
                 // Show the preload script as configured (relative to the project).
-                let preload = self
-                    .config
-                    .links
-                    .get(&s.name)
+                let link = self.config.links.get(&s.name);
+                let preload = link
                     .and_then(|l| l.preload.as_ref())
                     .map(|p| p.to_string_lossy().into_owned());
+                let (database, db_branch) = link
+                    .map(|l| (l.database.clone(), l.db_branch.clone()))
+                    .unwrap_or((None, None));
                 SiteInfo {
                     host: s.host(),
                     url: s.url(),
@@ -223,6 +224,8 @@ impl Registry {
                     preload,
                     node: node_pin.as_ref().map(|p| p.version.clone()),
                     node_source: node_pin.as_ref().map(|p| p.source.as_str().to_string()),
+                    database,
+                    db_branch,
                 }
             })
             .collect();
@@ -251,6 +254,8 @@ impl Registry {
                 preload: None,
                 node: None,
                 node_source: None,
+                database: None,
+                db_branch: None,
             });
         }
         infos.sort_by(|a, b| a.name.cmp(&b.name));

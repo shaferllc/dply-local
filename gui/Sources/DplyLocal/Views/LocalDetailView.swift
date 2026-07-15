@@ -162,6 +162,90 @@ struct LocalDetailView: View {
         }
     }
 
+    // MARK: Branch-aware database
+
+    @State private var dbBusy = false
+    @State private var dbBranches: [Store.DbBranch] = []
+    private var dbName: String? { site.first(["database"]) }
+    private var dbBranch: String? { site.first(["db_branch"]) }
+
+    /// Branch-aware databases: one Postgres DB per git branch, switched
+    /// automatically on checkout. Linked sites only (like PHP pins and HTTPS).
+    @ViewBuilder
+    private var databaseSection: some View {
+        DetailSection(title: "Database") {
+            VStack(alignment: .leading, spacing: 10) {
+                if !isLinked {
+                    Text("Link this site to give each git branch its own database.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if let db = dbName {
+                    HStack(spacing: 8) {
+                        Text(db).font(.system(.callout, design: .monospaced).weight(.medium))
+                        if let branch = dbBranch {
+                            Text(branch)
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .background(Theme.violet.opacity(0.18), in: Capsule())
+                                .foregroundStyle(Theme.violet)
+                        }
+                        if dbBusy { ProgressView().controlSize(.small) }
+                        Spacer()
+                        Button(role: .destructive) {
+                            Task { dbBusy = true; await store.detachBranchDb(name: name); dbBusy = false }
+                        } label: { Text("Detach") }
+                        .buttonStyle(.bordered).controlSize(.small)
+                    }
+                    if dbBranches.count > 1 || dbBranches.contains(where: { !$0.live }) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(dbBranches) { b in
+                                HStack(spacing: 8) {
+                                    Image(systemName: b.live ? "circle.fill" : "circle")
+                                        .font(.system(size: 7))
+                                        .foregroundStyle(b.live ? Theme.live : .secondary)
+                                    Text(b.branch).font(.system(.caption, design: .monospaced))
+                                    Text(b.size).font(.caption2).foregroundStyle(.tertiary)
+                                    if b.live {
+                                        Text("live").font(.caption2).foregroundStyle(Theme.live)
+                                    }
+                                    Spacer()
+                                    if !b.live {
+                                        Button {
+                                            Task {
+                                                dbBusy = true
+                                                await store.dropDbBranch(name: name, branch: b.branch)
+                                                dbBranches = await store.dbBranches(name: name)
+                                                dbBusy = false
+                                            }
+                                        } label: { Image(systemName: "trash").font(.caption2) }
+                                        .buttonStyle(.borderless).foregroundStyle(.tertiary)
+                                        .help("Drop this branch's parked database")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Text("Each git branch keeps its own copy — `git checkout` switches the database automatically.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    HStack(spacing: 10) {
+                        Button {
+                            Task { dbBusy = true; await store.attachBranchDb(name: name); dbBusy = false }
+                        } label: { Label("Attach", systemImage: "cylinder.split.1x2") }
+                        .buttonStyle(.bordered)
+                        .disabled(dbBusy)
+                        if dbBusy { ProgressView().controlSize(.small) }
+                        Spacer()
+                    }
+                    Text("Give each git branch its own database (from this project's `.env` DB_DATABASE). Checkouts then switch it automatically — migrations on a branch never bleed into another.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .task(id: "\(name)-\(dbName ?? "")-\(dbBranch ?? "")") {
+            dbBranches = dbName == nil ? [] : await store.dbBranches(name: name)
+        }
+    }
+
     // MARK: Node
 
     @State private var nodeBusy = false
@@ -395,6 +479,7 @@ struct LocalDetailView: View {
                 if !isProxy {
                     xdebugSection
                     profilerSection
+                    databaseSection
                     nodeSection
                 }
 

@@ -234,6 +234,12 @@ pub struct SiteInfo {
     /// Which file the Node pin came from (`.nvmrc`, `.node-version`, `package.json`).
     #[serde(default)]
     pub node_source: Option<String>,
+    /// Branch-aware base database, when attached (see `dpl db attach`).
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Which git branch's data is live in `database`.
+    #[serde(default)]
+    pub db_branch: Option<String>,
 }
 
 /// One local database/cache service.
