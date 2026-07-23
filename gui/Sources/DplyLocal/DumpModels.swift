@@ -133,9 +133,19 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
     var queue: String?
     var status: JSONScalar?
 
-    // HTTP fields.
+    // HTTP / request fields.
     var method: String?
     var url: String?
+    var route: String?
+
+    // Cache fields.
+    var operation: String?
+    var key: String?
+    var store: String?
+
+    /// Per-request grouping id — every payload from one HTTP request (or one
+    /// queue job) carries the same value, so the app can filter to a request.
+    var request: String?
 
     // Event / gate / livewire fields.
     var ability: String?
@@ -160,7 +170,8 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
         case sql, bindings, connection, slow, count
         case level, message, data
         case subject, from, to, cc, bcc, html, text
-        case name, queue, status, method, url
+        case name, queue, status, method, url, route
+        case operation, key, store, request
         case ability, result, user, component, arguments
         case diff, pause, token
         case rawSql = "raw_sql"
@@ -185,7 +196,9 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
         case "log": return message ?? "log"
         case "mail": return subject ?? "(no subject)"
         case "job": return name ?? "job"
-        case "http": return "\(method ?? "") \(url ?? "")"
+        case "http", "request": return "\(method ?? "") \(url ?? "")"
+        case "view": return name ?? "view"
+        case "cache": return "\((operation ?? "cache").uppercased()) \(key ?? "")"
         case "event": return name?.components(separatedBy: "\\").last ?? name ?? "event"
         case "gate": return ability ?? "gate"
         case "livewire": return component ?? "livewire"
@@ -229,6 +242,9 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
         case "mail": return "Mail"
         case "job": return "Job"
         case "http": return "HTTP"
+        case "view": return "View"
+        case "cache": return "Cache"
+        case "request": return "Request"
         case "event": return "Event"
         case "gate": return "Gate"
         case "livewire": return "Livewire"
@@ -244,7 +260,8 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
         var parts: [String?] = [
             label, location, file, site, screen, kind, preview,
             sql, rawSql, connection, message, level, subject, name, queue,
-            method, url, ability, result, user, component,
+            method, url, route, operation, key, store, request,
+            ability, result, user, component,
             status?.display,
         ]
         // One list at a time — chaining these with `+` sends the type-checker
@@ -281,6 +298,17 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
             if let text { out.append(text) }
         case "http":
             out.append("\(method ?? "") \(url ?? "") \(status?.display ?? "")")
+        case "request":
+            out.append("\(method ?? "") \(url ?? "") \(status?.display ?? "")")
+            if let route { out.append("route: \(route)") }
+            if let ms = timeMs { out.append(String(format: "%.2f ms", ms)) }
+        case "view":
+            out.append(name ?? "")
+            if let data { out.append(data.plainText()) }
+        case "cache":
+            out.append("\((operation ?? "").uppercased()) \(key ?? "")")
+            if let store { out.append("store: \(store)") }
+            if let data { out.append(data.plainText()) }
         case "event":
             out.append(name ?? "")
             if let data { out.append(data.plainText()) }
@@ -304,9 +332,11 @@ struct DumpEntry: Decodable, Identifiable, Hashable {
         switch kind {
         case "query", "n1": return rawSql ?? sql
         case "log": return message
-        case "http": return url
+        case "http", "request": return url
         case "mail": return subject
         case "event": return name
+        case "view": return name
+        case "cache": return key
         case "livewire": return component
         case "gate": return ability
         default: return nil

@@ -64,4 +64,4 @@ Target a non-default dply host per invocation with `--host`, e.g.
 
 ## License
 
-MIT.
+Proprietary. Licensed builds are distributed through Chandlery.

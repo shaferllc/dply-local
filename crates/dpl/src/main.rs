@@ -40,6 +40,7 @@ fn run() -> Result<()> {
         Command::Unpark { path } => commands::local::unpark(home.as_deref(), path),
         Command::Link { path, name } => commands::local::link(home.as_deref(), path, name),
         Command::Unlink { name } => commands::local::unlink(home.as_deref(), name),
+        Command::Relink { name, path } => commands::local::relink(home.as_deref(), name, path),
         Command::Secure { name } => commands::local::secure(home.as_deref(), name, true),
         Command::Unsecure { name } => commands::local::secure(home.as_deref(), name, false),
         Command::Open { name } => commands::local::open(home.as_deref(), name),

@@ -1,0 +1,15 @@
+{
+  "name" : "dply-local",
+  "presets" : {
+    "dev" : "cargo run",
+    "tests" : "cargo test"
+  },
+  "processes" : {
+    "cargo run" : {
+      "command" : "cargo run"
+    },
+    "cargo test" : {
+      "command" : "cargo test"
+    }
+  }
+}

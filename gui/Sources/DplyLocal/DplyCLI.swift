@@ -77,20 +77,116 @@ struct DplyCLI {
         throw DplyError.binaryNotFound(triedPaths: tried)
     }
 
-    /// `<workspace>/target/{debug,release}/dpl`, derived from this file's
-    /// location: …/gui/Sources/DplyLocal/DplyCLI.swift → up 3 → gui → up 1 →
-    /// workspace root.
+    /// `<workspace>/target/{debug,release}/dpl` for every workspace root we know
+    /// about — the build-time one first, then a relocated checkout if the
+    /// build-time path has gone missing.
     private func workspaceBinaryCandidates() -> [String] {
-        let thisFile = URL(fileURLWithPath: #filePath)
-        let workspace = thisFile
-            .deletingLastPathComponent() // DplyLocal
-            .deletingLastPathComponent() // Sources
-            .deletingLastPathComponent() // gui
-            .deletingLastPathComponent() // dply-local (workspace root)
-        return [
-            workspace.appendingPathComponent("target/release/dpl").path,
-            workspace.appendingPathComponent("target/debug/dpl").path,
-        ]
+        DplyCLI.workspaceRoots().flatMap { root in
+            [
+                root.appendingPathComponent("target/release/dpl").path,
+                root.appendingPathComponent("target/debug/dpl").path,
+            ]
+        }
+    }
+
+    /// The workspace root as of compile time, derived from this file's location:
+    /// …/gui/Sources/DplyLocal/DplyCLI.swift → up 3 → gui → up 1 → workspace root.
+    ///
+    /// `#filePath` is baked in when the app is built, so this is only correct for
+    /// as long as the checkout stays put. See `relocatedWorkspace()`.
+    private static let compileTimeWorkspace = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent() // DplyLocal
+        .deletingLastPathComponent() // Sources
+        .deletingLastPathComponent() // gui
+        .deletingLastPathComponent() // dply-local (workspace root)
+
+    private static let relocationLock = NSLock()
+    private static var relocationSearched = false
+    private static var relocationResult: URL?
+    private static let relocationDefaultsKey = "dplyRelocatedWorkspace"
+
+    /// Every plausible workspace root, best first.
+    private static func workspaceRoots() -> [URL] {
+        var roots: [URL] = []
+        if isWorkspace(compileTimeWorkspace) { roots.append(compileTimeWorkspace) }
+        if let moved = relocatedWorkspace(), moved != compileTimeWorkspace { roots.append(moved) }
+        return roots.isEmpty ? [compileTimeWorkspace] : roots
+    }
+
+    /// A workspace is a directory holding the Cargo manifest and the GUI package —
+    /// enough to tell our checkout from any other directory sharing its name.
+    private static func isWorkspace(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: url.appendingPathComponent("Cargo.toml").path)
+            && fm.fileExists(atPath: url.appendingPathComponent("gui/Package.swift").path)
+    }
+
+    /// Find the checkout after it has been moved.
+    ///
+    /// A released app is built once and then outlives several reorganisations of
+    /// the developer's `Projects` tree; when `#filePath` stops resolving, the app
+    /// has no idea the workspace it needs is sitting one directory over. So: walk
+    /// up the compile-time path to the deepest ancestor that still exists, then
+    /// search a bounded distance below it for a directory that looks like this
+    /// workspace. The answer is cached in memory and in defaults — the search runs
+    /// once per relocation, not once per `dpl` invocation.
+    private static func relocatedWorkspace() -> URL? {
+        relocationLock.lock()
+        defer { relocationLock.unlock() }
+        if relocationSearched { return relocationResult }
+        relocationSearched = true
+
+        // A previously discovered root, if it is still a workspace.
+        if let remembered = UserDefaults.standard.string(forKey: relocationDefaultsKey) {
+            let url = URL(fileURLWithPath: remembered)
+            if isWorkspace(url) {
+                relocationResult = url
+                return url
+            }
+            UserDefaults.standard.removeObject(forKey: relocationDefaultsKey)
+        }
+
+        let name = compileTimeWorkspace.lastPathComponent
+        var base = compileTimeWorkspace
+        let fm = FileManager.default
+        while base.pathComponents.count > 1, !fm.fileExists(atPath: base.path) {
+            base = base.deletingLastPathComponent()
+        }
+        // Bail rather than crawl `/` or `/Users` when nothing on the path survives.
+        guard base.pathComponents.count > 2, fm.fileExists(atPath: base.path) else { return nil }
+
+        guard let found = search(from: base, named: name, maxDepth: 4) else { return nil }
+        UserDefaults.standard.set(found.path, forKey: relocationDefaultsKey)
+        relocationResult = found
+        return found
+    }
+
+    /// Breadth-first search for a workspace directory named `name`, at most
+    /// `maxDepth` levels below `base`. Skips hidden directories and the usual
+    /// deep-and-uninteresting build/dependency trees so this stays milliseconds.
+    private static func search(from base: URL, named name: String, maxDepth: Int) -> URL? {
+        let skip: Set<String> = ["node_modules", "target", ".build", "vendor", "Library", "Pods"]
+        let fm = FileManager.default
+        var frontier = [base]
+        for _ in 0..<maxDepth {
+            var next: [URL] = []
+            for dir in frontier {
+                let children = (try? fm.contentsOfDirectory(
+                    at: dir,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                )) ?? []
+                for child in children {
+                    guard (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
+                          !skip.contains(child.lastPathComponent) else { continue }
+                    if child.lastPathComponent == name, isWorkspace(child) { return child }
+                    next.append(child)
+                }
+            }
+            if next.isEmpty { return nil }
+            frontier = next
+        }
+        return nil
     }
 
     /// The environment to hand every child process.

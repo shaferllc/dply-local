@@ -561,6 +561,29 @@ impl Registry {
         Ok(format!("Linked {} → {}.test", path.display(), name))
     }
 
+    /// Move a linked site to a different directory.
+    ///
+    /// Deliberately not "unlink then link": `link` writes a fresh `Link` with
+    /// every setting at its default, so relinking through it would silently drop
+    /// the site's PHP pin, HTTPS, runtime, Xdebug and database branch. A project
+    /// that moves on disk is still the same site — only the path changes.
+    pub fn relink(&mut self, name: &str, path: &str) -> Result<String> {
+        let name = name.to_lowercase();
+        let path = canonicalize(path)?;
+        let link = self
+            .config
+            .links
+            .get_mut(&name)
+            .with_context(|| format!("no linked site named `{name}` (try `dpl link {}`)", path.display()))?;
+        if link.path == path {
+            return Ok(format!("{name} already points at {}.", path.display()));
+        }
+        let old = std::mem::replace(&mut link.path, path.clone());
+        self.save()?;
+        self.reconcile_site(&name);
+        Ok(format!("{name} now points at {} (was {}).", path.display(), old.display()))
+    }
+
     pub fn unlink(&mut self, name: &str) -> Result<String> {
         let name = name.to_lowercase();
         if self.config.links.remove(&name).is_none() {

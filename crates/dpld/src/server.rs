@@ -174,6 +174,7 @@ async fn dispatch(
             mutate(state, |r| r.link(name.as_deref(), &path)).await
         }
         Request::Unlink { name } => mutate(state, |r| r.unlink(&name)).await,
+        Request::Relink { name, path } => mutate(state, |r| r.relink(&name, &path)).await,
         Request::Secure { name, secure } => {
             mutate(state, |r| r.set_secure(&name, secure)).await
         }

@@ -373,6 +373,64 @@ struct LocalDetailView: View {
         }
     }
 
+    // MARK: Site path
+
+    private var sitePath: String { site.cell(["path"]) }
+
+    /// A project that has been moved or deleted out from under dply. The daemon
+    /// still has the old path, so the site is listed but can never serve.
+    private var pathMissing: Bool {
+        !sitePath.isEmpty && !FileManager.default.fileExists(atPath: sitePath)
+    }
+
+    /// The path under the site's name. For a linked site it's a button: projects
+    /// get moved, and re-linking by hand costs you every setting on the site.
+    /// Parked sites take their path from the parked folder, so it's just text.
+    @ViewBuilder
+    private var pathLine: some View {
+        let label = HStack(spacing: 4) {
+            if pathMissing {
+                Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
+            }
+            Text(sitePath)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1).truncationMode(.middle)
+            if isLinked {
+                Image(systemName: "pencil").font(.caption2)
+            }
+        }
+        .foregroundStyle(pathMissing ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+
+        if isLinked {
+            Button { choosePath() } label: { label }
+                .buttonStyle(.plain)
+                .help(pathMissing
+                      ? "This folder no longer exists — choose where the project moved to"
+                      : "Change this site's folder")
+        } else {
+            label.help("Parked sites follow their parked folder")
+        }
+    }
+
+    private func choosePath() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use Folder"
+        panel.message = "Choose the folder \(site.cell(["host"])) should serve."
+        // Open where the project used to be, so a move within the same parent is
+        // one click. If that's gone, fall back to the nearest surviving parent.
+        var start = URL(fileURLWithPath: sitePath)
+        let fm = FileManager.default
+        while start.pathComponents.count > 1, !fm.fileExists(atPath: start.path) {
+            start = start.deletingLastPathComponent()
+        }
+        panel.directoryURL = start
+        guard panel.runModal() == .OK, let url = panel.url, url.path != sitePath else { return }
+        Task { await store.relinkLocal(name: name, path: url.path) }
+    }
+
     // MARK: Site detail
 
     private var siteDetail: some View {
@@ -383,10 +441,7 @@ struct LocalDetailView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(site.cell(["host"]))
                             .font(.title2.weight(.bold))
-                        Text(site.cell(["path"]))
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1).truncationMode(.middle)
+                        pathLine
                     }
                     Spacer()
                     StatusBadge(status: isServing ? "serving" : "stopped")

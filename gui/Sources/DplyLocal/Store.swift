@@ -999,6 +999,14 @@ final class Store: ObservableObject {
         await loadLocal()
     }
 
+    /// Point a linked site at a different directory. The site keeps its name and
+    /// every setting — this is for projects that moved on disk, not a re-link.
+    func relinkLocal(name: String, path: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["relink", name, path]) }
+        await loadLocal()
+    }
+
     /// Proxy a `.test` host to another local service.
     func proxyLocal(name: String, target: String) async {
         let cli = self.cli
@@ -1248,8 +1256,10 @@ final class Store: ObservableObject {
     @Published var dumps: [DumpEntry] = []
     @Published var dumpSiteFilter: String? = nil { didSet { if oldValue != dumpSiteFilter { recomputeDerived() } } }
     @Published var dumpScreenFilter: String? = nil { didSet { if oldValue != dumpScreenFilter { recomputeDerived() } } }
-    // nil=all; else a category: dump/query/log/mail/job/http/…
+    // nil=all; else a category: dump/query/log/mail/job/view/cache/http/…
     @Published var dumpTypeFilter: String? = nil { didSet { if oldValue != dumpTypeFilter { recomputeDerived() } } }
+    // nil=all; else one request id — set from a row's "Only this request".
+    @Published var dumpRequestFilter: String? = nil { didSet { if oldValue != dumpRequestFilter { recomputeDerived() } } }
     @Published var dumpSearch: String = "" { didSet { if oldValue != dumpSearch { scheduleSearchRefilter() } } }
 
     /// Derived views of `dumps`, recomputed only when the buffer or a filter
@@ -1392,6 +1402,7 @@ final class Store: ObservableObject {
             if let s = d.screen { screens.insert(s) }
             let passesNonType = (dumpSiteFilter == nil || d.site == dumpSiteFilter)
                 && (dumpScreenFilter == nil || d.screen == dumpScreenFilter)
+                && (dumpRequestFilter == nil || d.request == dumpRequestFilter)
                 && (search.isEmpty || d.searchIndex.contains(search))
             guard passesNonType else { continue }
             counts[d.category, default: 0] += 1

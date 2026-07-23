@@ -93,6 +93,10 @@ pub fn unlink(home: Option<&str>, name: Option<String>) -> Result<()> {
     send_message(home, Request::Unlink { name: resolve_name(name)? })
 }
 
+pub fn relink(home: Option<&str>, name: String, path: Option<String>) -> Result<()> {
+    send_message(home, Request::Relink { name: name.to_lowercase(), path: resolve_path(path)? })
+}
+
 pub fn secure(home: Option<&str>, name: Option<String>, secure: bool) -> Result<()> {
     send_message(home, Request::Secure { name: resolve_name(name)?, secure })
 }

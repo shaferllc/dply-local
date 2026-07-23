@@ -39,11 +39,13 @@ A browser REPL into a site (`artisan tinker`) plus a live query inspector, serve
 same-origin — so debugging never leaves the browser. Builds on the `dpl tinker`
 CLI already shipped; the query inspector rides the same dumps/debug bridge.
 
-### 6. Richer debug capture
-Expand the dumps receiver into the full picture the app can already sink: queries,
-jobs, views, mail, cache, events, and outbound HTTP — each a filterable tab keyed
-by request, like the mockups. The transport (`:9912`) exists; this is capture +
-presentation.
+### 6. ✅ Richer debug capture — shipped
+The full picture now flows: queries, jobs, views, mail, cache, events, outbound
+HTTP, and request summaries — all auto-captured by `shaferllc/dumps`, each a
+filterable category in the Dumps panel. Every payload carries a per-request id
+(fresh per queue job / Octane request too), so "Only this request" isolates one
+request's complete activity. The transport (`:9912`) was already there; this
+added views/cache/request capture and the request keying + filtering.
 
 ## Workflow
 

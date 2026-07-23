@@ -78,6 +78,13 @@ pub enum Command {
         /// Site name (default: current directory's name).
         name: Option<String>,
     },
+    /// Point a linked site at a different directory, keeping its settings.
+    Relink {
+        /// Site name.
+        name: String,
+        /// The project's new directory (default: current directory).
+        path: Option<String>,
+    },
     /// Serve a linked site over HTTPS (trust lands in Phase 4).
     Secure {
         /// Site name (default: current directory's name).

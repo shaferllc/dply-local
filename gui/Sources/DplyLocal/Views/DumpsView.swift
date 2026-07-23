@@ -9,8 +9,9 @@ struct DumpsListView: View {
 
     /// Categories offered in the type picker, in menu order.
     private static let categories: [(id: String, label: String)] = [
-        ("dump", "Dumps"), ("query", "Queries"), ("log", "Logs"), ("mail", "Mail"),
-        ("job", "Jobs"), ("http", "HTTP"), ("event", "Events"), ("gate", "Gates"),
+        ("dump", "Dumps"), ("request", "Requests"), ("query", "Queries"), ("log", "Logs"),
+        ("mail", "Mail"), ("job", "Jobs"), ("view", "Views"), ("cache", "Cache"),
+        ("http", "HTTP"), ("event", "Events"), ("gate", "Gates"),
         ("livewire", "Livewire"), ("time", "Timers"),
     ]
 
@@ -82,6 +83,7 @@ struct DumpsListView: View {
         store.dumpSiteFilter = nil
         store.dumpScreenFilter = nil
         store.dumpTypeFilter = nil
+        store.dumpRequestFilter = nil
         store.dumpSearch = ""
     }
 
@@ -113,6 +115,21 @@ struct DumpsListView: View {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
                     }
                     .buttonStyle(.plain).help("Clear the filter")
+                }
+                if let req = store.dumpRequestFilter {
+                    HStack(spacing: 3) {
+                        Text("request \(String(req.prefix(6)))")
+                            .font(.caption2.monospaced())
+                        Button { store.dumpRequestFilter = nil } label: {
+                            Image(systemName: "xmark.circle.fill").font(.caption2)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.purple.opacity(0.15), in: Capsule())
+                    .foregroundStyle(.purple)
+                    .fixedSize()
+                    .help("Showing one request's activity — click ✕ to show all")
                 }
                 Text(countLabel)
                     .font(.caption2.monospacedDigit())
@@ -179,6 +196,9 @@ struct DumpContextMenu: View {
         if let screen = dump.screen {
             Button("Only screen \(screen)", systemImage: "rectangle.on.rectangle") { store.dumpScreenFilter = screen }
         }
+        if let req = dump.request {
+            Button("Only this request", systemImage: "arrow.triangle.turn.up.right.circle") { store.dumpRequestFilter = req }
+        }
         Button("Only \(dump.kindLabel)s", systemImage: "square.stack.3d.up") { store.dumpTypeFilter = dump.category }
         Divider()
         Button(role: .destructive) { store.hideDump(dump.id) } label: {
@@ -211,7 +231,7 @@ struct DumpRow: View {
     @ViewBuilder private var title: some View {
         HStack(spacing: 6) {
             switch dump.kind {
-            case "query", "http":
+            case "query", "http", "request", "cache":
                 highlight(dump.preview).font(.system(.callout, design: .monospaced)).lineLimit(1)
             case "n1":
                 highlight("N+1 · \(dump.sql ?? "")").font(.system(.callout, design: .monospaced)).lineLimit(1)
@@ -267,6 +287,10 @@ struct DumpRow: View {
                 if let u = dump.user { Text("· user \(u)").font(.caption2).foregroundStyle(.tertiary) }
             case "event":
                 if let full = dump.name { Text(full).font(.system(.caption2, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1) }
+            case "request":
+                if let route = dump.route { Text("route: \(route)").font(.caption2).foregroundStyle(.tertiary) }
+            case "cache":
+                if let s = dump.store { Text(s).font(.caption2).foregroundStyle(.tertiary) }
             case "livewire":
                 Text("component").font(.caption2).foregroundStyle(.tertiary)
             default:
@@ -281,7 +305,7 @@ struct DumpRow: View {
         switch dump.kind {
         case "query":
             if let ms = dump.timeMs { msBadge(ms, red: dump.slow == true) }
-        case "http":
+        case "http", "request":
             HStack(spacing: 5) {
                 if let s = dump.status?.display { statusBadge(s) }
                 if let ms = dump.timeMs { Text("\(ms, specifier: "%.0f")ms").font(.system(.caption2, design: .monospaced)).foregroundStyle(.tertiary) }
@@ -326,6 +350,9 @@ struct DumpRow: View {
         case "mail": return "envelope"
         case "job": return "gearshape"
         case "http": return "network"
+        case "request": return "globe"
+        case "view": return "doc.text"
+        case "cache": return "archivebox"
         case "event": return "arrow.triangle.branch"
         case "gate": return "lock.shield"
         case "livewire": return "bolt.horizontal.circle"
@@ -347,6 +374,15 @@ struct DumpRow: View {
             default: return .blue
             }
         case "http": return .teal
+        case "request": return .purple
+        case "view": return .cyan
+        case "cache":
+            switch dump.operation {
+            case "hit": return .green
+            case "miss": return .orange
+            case "forget": return .red
+            default: return .blue // write
+            }
         case "event": return .indigo
         case "gate": return dump.result == "allowed" ? .green : .red
         case "livewire": return .pink
@@ -375,9 +411,9 @@ struct DumpDetailView: View {
     /// True when the body renders a value tree that expand/collapse-all applies to.
     private var hasTree: Bool {
         switch dump.kind {
-        case "log", "event", "livewire": return dump.data?.isExpandable == true
+        case "log", "event", "livewire", "view", "cache": return dump.data?.isExpandable == true
         case "gate": return dump.arguments?.isExpandable == true
-        case "query", "n1", "mail", "job", "http": return false
+        case "query", "n1", "mail", "job", "http", "request": return false
         default: return dump.diff != true && (dump.values ?? []).contains { $0.isExpandable }
         }
     }
@@ -394,6 +430,9 @@ struct DumpDetailView: View {
                 case "mail": mailBody
                 case "job": jobBody
                 case "http": httpBody
+                case "request": requestBody
+                case "view": viewBody
+                case "cache": cacheBody
                 case "event": eventBody
                 case "gate": gateBody
                 case "livewire": livewireBody
@@ -560,6 +599,78 @@ struct DumpDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
                 .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    @ViewBuilder private var requestBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(dump.method ?? "").font(.callout.bold().monospaced())
+                if let s = dump.status?.display { Text(s).font(.callout.monospaced()) }
+                if let ms = dump.timeMs { Text(String(format: "%.0f ms", ms)).font(.caption).foregroundStyle(.secondary) }
+                Spacer()
+            }
+            Text(dump.url ?? "")
+                .font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            if let route = dump.route {
+                Text("route: \(route)").font(.caption).foregroundStyle(.secondary)
+            }
+            if let req = dump.request {
+                Button {
+                    store.dumpRequestFilter = req
+                } label: {
+                    Label("Show this request's activity", systemImage: "line.3.horizontal.decrease.circle")
+                }
+                .buttonStyle(.link).font(.caption)
+            }
+        }
+    }
+
+    @ViewBuilder private var viewBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(dump.name ?? "view")
+                .font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                .foregroundStyle(.cyan)
+            if let data = dump.data {
+                DetailSection(title: "Data") {
+                    DumpNodeView(node: data, depth: 0, initiallyExpanded: true, signal: expansion)
+                }
+            } else {
+                Text("No view data.").font(.callout).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder private var cacheBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text((dump.operation ?? "").uppercased())
+                    .font(.caption.bold()).padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(cacheColor.opacity(0.15), in: Capsule()).foregroundStyle(cacheColor)
+                Text(dump.key ?? "")
+                    .font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                Spacer()
+            }
+            if let s = dump.store {
+                Text("store: \(s)").font(.caption).foregroundStyle(.secondary)
+            }
+            if let data = dump.data {
+                DetailSection(title: "Value") {
+                    DumpNodeView(node: data, depth: 0, initiallyExpanded: true, signal: expansion)
+                }
+            }
+        }
+    }
+
+    private var cacheColor: Color {
+        switch dump.operation {
+        case "hit": return .green
+        case "miss": return .orange
+        case "forget": return .red
+        default: return .blue // write
         }
     }
 

@@ -52,6 +52,9 @@ pub enum Request {
     Link { name: Option<String>, path: String },
     /// Remove a linked site by name.
     Unlink { name: String },
+    /// Point an existing linked site at a different directory, keeping the name
+    /// and every setting (PHP, HTTPS, runtime, Xdebug…) it already had.
+    Relink { name: String, path: String },
     /// Bulk import parked dirs + named links (one save/reconcile). Links are
     /// `(name, path)` pairs.
     ImportSites { parked: Vec<String>, links: Vec<(String, String)> },
