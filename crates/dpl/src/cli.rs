@@ -213,10 +213,25 @@ pub enum Command {
         command: Option<PreloadCmd>,
     },
     /// Per-project Node version, via fnm/nvm. `dpl node` shows each site's pinned
-    /// version; `use` writes its `.nvmrc`; `install` installs a version.
+    /// version; `use` writes its `.nvmrc`; `install` installs a version; `deps`
+    /// and `run` fan a package-manager command out across every site.
     Node {
         #[command(subcommand)]
         command: Option<NodeCmd>,
+    },
+    /// Free-form tags on linked sites, for grouping a large fleet by whatever
+    /// detection can't see — client, status, ownership. `dpl tags` lists them.
+    Tags {
+        #[command(subcommand)]
+        command: Option<TagsCmd>,
+    },
+    /// Supervised Node dev servers per site (`npm run dev` and friends). The
+    /// daemon runs the script, restarts it if it dies, and reports where it's
+    /// listening — so it outlives the terminal you started it from. `dpl dev`
+    /// with no subcommand lists them.
+    Dev {
+        #[command(subcommand)]
+        command: Option<DevCmd>,
     },
     /// Control Xdebug per site: step debugging, profiling, tracing.
     Xdebug {
@@ -466,6 +481,11 @@ pub enum MailCmd {
 /// Per-project Node operations. dpl doesn't run Node — it manages each repo's
 /// `.nvmrc` pin (which fnm/nvm auto-switch on) and installs versions through the
 /// manager. `dpl node` with no subcommand lists each site's pinned version.
+///
+/// `deps`/`run`/`exec` are the exception to "dpl doesn't run Node": they fan a
+/// command out across your sites, applying each site's pin per invocation (there
+/// is no `cd` to trigger the switch) and using whichever package manager that
+/// site's lockfile or `packageManager` field calls for.
 #[derive(Subcommand)]
 pub enum NodeCmd {
     /// Show each site's pinned Node version and the detected manager (default).
@@ -486,6 +506,131 @@ pub enum NodeCmd {
     Detect {
         /// Linked site name; omit for the current directory.
         site: Option<String>,
+    },
+    /// Install dependencies in every linked site that has a package.json, each
+    /// through its own package manager (npm/pnpm/yarn/bun) and Node pin.
+    Deps {
+        #[command(flatten)]
+        fan: FanArgs,
+        /// Install strictly from the lockfile, refusing to update it — `npm ci`,
+        /// `pnpm install --frozen-lockfile`, `yarn install --immutable`.
+        #[arg(long)]
+        frozen: bool,
+    },
+    /// Run a package.json script in every linked site that has one, through each
+    /// site's own package manager. E.g. `dpl node run build`.
+    Run {
+        #[command(flatten)]
+        fan: FanArgs,
+        /// The script name, as it appears in package.json `scripts`.
+        script: String,
+        /// Extra arguments for the script itself.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Hand a command to each site's own package manager verbatim. E.g.
+    /// `dpl node exec outdated`, `dpl node exec add --save-dev vite`.
+    Exec {
+        #[command(flatten)]
+        fan: FanArgs,
+        /// Everything after this goes to the package manager unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
+    /// Like `exec`, but always npm — for the sites where you want npm
+    /// specifically, whatever their lockfile says.
+    Npm {
+        #[command(flatten)]
+        fan: FanArgs,
+        /// Everything after this is passed to npm verbatim.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
+    /// List the package.json scripts each site can run, and the package manager
+    /// detected for it.
+    Scripts {
+        /// Only this linked site (default: every site with a package.json).
+        site: Option<String>,
+    },
+}
+
+/// The options every fan-out command shares: which sites, which agent, and what
+/// to do when one of them fails.
+#[derive(Args)]
+pub struct FanArgs {
+    /// Only this linked site (default: every site with a package.json).
+    #[arg(long)]
+    pub site: Option<String>,
+    /// Force a package manager instead of detecting one per site: npm, pnpm,
+    /// yarn, or bun.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Stop at the first site that fails (default: run them all, then report).
+    #[arg(long)]
+    pub fail_fast: bool,
+}
+
+/// Tag operations. Tags complement the detected framework/kind: those say what
+/// a project *is*, tags say what it's *for*.
+#[derive(Subcommand)]
+pub enum TagsCmd {
+    /// List every tag in use and the sites carrying it (the default).
+    List,
+    /// Show one site's tags.
+    Show { site: String },
+    /// Add tags to a site, keeping the ones already there.
+    Add {
+        site: String,
+        /// One or more tags.
+        #[arg(required = true)]
+        tags: Vec<String>,
+    },
+    /// Remove tags from a site.
+    Rm {
+        site: String,
+        /// One or more tags.
+        #[arg(required = true)]
+        tags: Vec<String>,
+    },
+    /// Replace a site's tags outright; pass none to clear them.
+    Set {
+        site: String,
+        tags: Vec<String>,
+    },
+}
+
+/// Dev-server operations. A dev server is a side-car, not a runtime: PHP still
+/// serves the site, and the page it renders loads assets from the dev server's
+/// own port. To point a `.test` host *at* a port instead, use `dpl proxy`.
+#[derive(Subcommand)]
+pub enum DevCmd {
+    /// Show every supervised dev server and where it's listening (the default).
+    Status,
+    /// Turn a site's dev server on and start it.
+    On {
+        /// Linked site name.
+        site: String,
+        /// package.json script to run (default: `dev`).
+        #[arg(long)]
+        script: Option<String>,
+    },
+    /// Stop a site's dev server and turn it off.
+    Off {
+        /// Linked site name.
+        site: String,
+    },
+    /// Restart a site's dev server, clearing any give-up state.
+    Restart {
+        /// Linked site name.
+        site: String,
+    },
+    /// Print what a site's dev server has logged.
+    Logs {
+        /// Linked site name.
+        site: String,
+        /// How many trailing lines to show.
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
     },
 }
 

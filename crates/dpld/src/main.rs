@@ -10,6 +10,7 @@ mod appserver;
 mod branchdb;
 mod ca;
 mod dns;
+mod devserver;
 mod dumps;
 mod fastcgi;
 mod fpm;
@@ -139,6 +140,12 @@ fn main() -> anyhow::Result<()> {
             tokio::spawn(async move { branchdb::watch(state).await })
         };
 
+        // Keep opted-in Node dev servers alive for the daemon's lifetime.
+        let devserver_task = {
+            let state = state.clone();
+            tokio::spawn(async move { devserver::watch(state).await })
+        };
+
         let result = server::run(state).await;
 
         proxy_task.abort();
@@ -147,6 +154,7 @@ fn main() -> anyhow::Result<()> {
         mail_task.abort();
         dumps_task.abort();
         branchdb_task.abort();
+        devserver_task.abort();
         result
     })
 }

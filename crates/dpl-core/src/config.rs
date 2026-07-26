@@ -26,6 +26,51 @@ pub fn is_native_tld(tld: &str) -> bool {
     tld.eq_ignore_ascii_case("localhost")
 }
 
+/// Clean up user-supplied tags: lowercased, trimmed, spaces and underscores
+/// folded to `-`, empties dropped, deduped, sorted.
+///
+/// Normalising is what makes tags a *grouping* rather than a pile of near-misses
+/// — without it `Client X`, `client x` and `client-x` are three separate tags
+/// and the fleet view is worse than no tags at all.
+pub fn normalize_tags<I, S>(tags: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out: Vec<String> = tags
+        .into_iter()
+        .map(|t| {
+            t.as_ref()
+                .trim()
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_whitespace() || c == '_' { '-' } else { c })
+                .collect::<String>()
+        })
+        // Collapse the runs of `-` that folding can produce ("client  x").
+        .map(|t| {
+            let mut s = String::with_capacity(t.len());
+            let mut last_dash = false;
+            for c in t.chars() {
+                if c == '-' {
+                    if !last_dash && !s.is_empty() {
+                        s.push(c);
+                    }
+                    last_dash = true;
+                } else {
+                    s.push(c);
+                    last_dash = false;
+                }
+            }
+            s.trim_end_matches('-').to_string()
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LocalConfig {
@@ -54,6 +99,13 @@ pub struct LocalConfig {
     pub default_xdebug: Option<String>,
     /// IDE-side Xdebug connection settings, shared by every site.
     pub xdebug: crate::xdebug::Settings,
+    /// Free-form labels per site name — `client-x`, `archive`, `wip`.
+    ///
+    /// Keyed by site *name* rather than stored on the link, because roughly half
+    /// a typical fleet is parked rather than linked, and a parked site has no
+    /// link to hang metadata on. Tags describe the site, not how it was
+    /// registered. Normalised on the way in (see [`normalize_tags`]).
+    pub tags: BTreeMap<String, Vec<String>>,
 }
 
 impl LocalConfig {
@@ -141,6 +193,12 @@ pub struct Link {
     /// reverse-proxied instead of served over FastCGI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// package.json script the daemon runs as this site's dev server (`"dev"`,
+    /// `"watch"`, …). None = off, which is the default and stays the default:
+    /// starting a dev server per site is opt-in because a fleet of them is a
+    /// fleet of long-lived Node processes. See `dpl dev`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<String>,
     /// Xdebug mode for this site (overrides `default_xdebug`). A site with a
     /// mode of its own gets its own php-fpm master.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,4 +285,31 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::normalize_tags;
+
+    /// The point of normalising: three spellings of one idea must collapse to
+    /// one tag, or grouping by tag is worse than not having tags.
+    #[test]
+    fn spellings_of_one_tag_collapse() {
+        assert_eq!(
+            normalize_tags(["Client X", "client x", "client-x", "CLIENT_X"]),
+            vec!["client-x"]
+        );
+    }
+
+    #[test]
+    fn empties_and_stray_dashes_are_dropped() {
+        assert_eq!(normalize_tags(["  ", "", "-", "wip "]), vec!["wip"]);
+        assert_eq!(normalize_tags(["client   x"]), vec!["client-x"]);
+        assert_eq!(normalize_tags(["trailing-"]), vec!["trailing"]);
+    }
+
+    #[test]
+    fn results_are_sorted_so_display_is_stable() {
+        assert_eq!(normalize_tags(["wip", "archive", "client-x"]), vec!["archive", "client-x", "wip"]);
+    }
 }

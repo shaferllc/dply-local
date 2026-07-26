@@ -87,6 +87,15 @@ pub enum Request {
     /// relative to its project root. A preloaded site gets its own php-fpm master
     /// with `opcache.preload` set.
     SetPreload { site: String, script: Option<String> },
+    /// Turn a site's supervised Node dev server on (with a package.json script)
+    /// or off (`script` = None). See `dpl dev`.
+    SetDev { site: String, script: Option<String> },
+    /// Restart one site's dev server, clearing any give-up state.
+    RestartDev { site: String },
+    /// Every supervised dev server's current state.
+    DevStatus,
+    /// Replace a linked site's tags (empty clears them).
+    SetTags { site: String, tags: Vec<String> },
     /// Manage reverse proxies. `action` ∈ set|remove (list is via ListSites).
     Proxy { action: String, name: String, target: Option<String> },
     /// Pin a PHP version for a site (or set the default when `site` is None).
@@ -184,6 +193,10 @@ pub enum Response {
     Versions {
         versions: Vec<VersionInfo>,
     },
+    /// Supervised Node dev servers and their state.
+    DevServers {
+        servers: Vec<DevServerInfo>,
+    },
     /// A list of lines (e.g. database names) for the CLI to print.
     Lines {
         lines: Vec<String>,
@@ -195,6 +208,25 @@ pub enum Response {
 
     #[serde(other)]
     Unknown,
+}
+
+/// One supervised Node dev server, as reported to the CLI/GUI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevServerInfo {
+    pub site: String,
+    /// The package.json script being run.
+    pub script: String,
+    /// The package manager running it.
+    pub agent: String,
+    pub running: bool,
+    /// The port it announced in its own output, once it has.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Why it isn't running, when it isn't.
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Absolute path to its log file.
+    pub log: String,
 }
 
 /// One local site, as reported to the CLI/GUI over IPC.
@@ -244,6 +276,32 @@ pub struct SiteInfo {
     /// Which file the Node pin came from (`.nvmrc`, `.node-version`, `package.json`).
     #[serde(default)]
     pub node_source: Option<String>,
+    /// The package manager this site's repo calls for (`npm`/`pnpm`/`yarn`/`bun`),
+    /// or `None` when it has no `package.json` at all — which is also how the GUI
+    /// knows whether to offer the Node actions.
+    #[serde(default)]
+    pub node_agent: Option<String>,
+    /// What identified the agent: a lockfile name, `packageManager`, or `assumed`.
+    #[serde(default)]
+    pub node_agent_source: Option<String>,
+    /// The package.json script supervised as this site's dev server, if any.
+    #[serde(default)]
+    pub dev: Option<String>,
+    /// Whether that dev server is up right now.
+    #[serde(default)]
+    pub dev_running: bool,
+    /// The port it announced in its own output, once it has.
+    #[serde(default)]
+    pub dev_port: Option<u16>,
+    /// Coarse project type: `php` | `node` | `static` | `unknown`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The JavaScript framework, when `framework` is a PHP one.
+    #[serde(default)]
+    pub node_framework: Option<String>,
+    /// User-assigned tags for grouping and filtering.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// Branch-aware base database, when attached (see `dpl db attach`).
     #[serde(default)]
     pub database: Option<String>,

@@ -37,10 +37,210 @@ pub fn detect_required_php(project: &Path) -> Option<String> {
 /// the same file twice; the daemon's hot `dpl sites` path uses this instead so
 /// each project's composer.json is read once per reconcile, not twice per call.
 pub fn detect_meta(project: &Path) -> (Option<String>, Option<String>) {
-    match std::fs::read_to_string(project.join("composer.json")) {
-        Ok(text) => (framework_from_composer(&text), required_php_from_composer(&text)),
-        Err(_) => (framework_without_composer(project), None),
+    let meta = detect_project(project);
+    (meta.framework, meta.requires_php)
+}
+
+/// The coarse bucket a project falls into — what it *is*, as distinct from which
+/// framework it uses. This is the axis worth grouping a site list by: "show me
+/// the Node projects" is a question a fleet of a hundred sites makes you ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectKind {
+    /// Served by PHP — the composer projects and the bare-`index.php` ones.
+    Php,
+    /// A JavaScript project: `package.json` and no PHP behind it.
+    Node,
+    /// Plain files, no runtime.
+    Static,
+    /// A project in some other language. Not servable as a `.test` site, but
+    /// worth naming: a parked folder full of these is a fleet you can prune,
+    /// and "unknown" tells you nothing about which ones those are.
+    Other,
+    /// Nothing recognisable — an empty folder, a monorepo parent, a dead path.
+    #[default]
+    Unknown,
+}
+
+impl ProjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectKind::Php => "php",
+            ProjectKind::Node => "node",
+            ProjectKind::Static => "static",
+            ProjectKind::Other => "other",
+            ProjectKind::Unknown => "unknown",
+        }
     }
+
+    pub fn parse(s: &str) -> Option<ProjectKind> {
+        match s.trim().to_lowercase().as_str() {
+            "php" => Some(ProjectKind::Php),
+            "node" => Some(ProjectKind::Node),
+            "static" => Some(ProjectKind::Static),
+            "other" => Some(ProjectKind::Other),
+            "unknown" => Some(ProjectKind::Unknown),
+            _ => None,
+        }
+    }
+}
+
+/// Everything detection can say about a project from its manifests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectMeta {
+    /// The headline label — what the site *is*, e.g. `Laravel (^13.0)`,
+    /// `Next.js (^15.0)`, `WordPress`.
+    pub framework: Option<String>,
+    pub kind: ProjectKind,
+    /// composer.json `require.php`.
+    pub requires_php: Option<String>,
+    /// The JavaScript framework, when it isn't the headline — a Laravel app with
+    /// a Vue front end is a Laravel site *and* a Vue codebase, and hiding the
+    /// second fact makes the fleet look more uniform than it is.
+    pub node_framework: Option<String>,
+}
+
+/// Identify a project from its manifests.
+///
+/// PHP wins the headline whenever a `composer.json` is present: that's what
+/// actually serves the site here, and a Laravel app's `package.json` describes
+/// its asset pipeline, not its identity. The JavaScript side is still reported,
+/// just not as the primary label.
+pub fn detect_project(project: &Path) -> ProjectMeta {
+    let composer = std::fs::read_to_string(project.join("composer.json")).ok();
+    let package = std::fs::read_to_string(project.join("package.json")).ok();
+    let node_framework = package.as_deref().and_then(node_framework_from_package);
+
+    if let Some(text) = composer {
+        return ProjectMeta {
+            framework: framework_from_composer(&text),
+            kind: ProjectKind::Php,
+            requires_php: required_php_from_composer(&text),
+            node_framework,
+        };
+    }
+
+    // No composer.json. A PHP entry point still means a PHP site (WordPress
+    // installs and hand-rolled projects both land here).
+    if let Some(php) = framework_without_composer(project) {
+        return ProjectMeta {
+            framework: Some(php),
+            kind: ProjectKind::Php,
+            requires_php: None,
+            node_framework,
+        };
+    }
+
+    if package.is_some() {
+        return ProjectMeta {
+            // A package.json with nothing recognisable in it is still a Node
+            // project — say so rather than shrugging.
+            framework: node_framework.clone().or_else(|| Some("Node".into())),
+            kind: ProjectKind::Node,
+            requires_php: None,
+            node_framework,
+        };
+    }
+
+    if project.join("index.html").is_file() {
+        return ProjectMeta {
+            framework: Some("Static".into()),
+            kind: ProjectKind::Static,
+            ..Default::default()
+        };
+    }
+
+    if let Some(label) = other_language(project) {
+        return ProjectMeta {
+            framework: Some(label.into()),
+            kind: ProjectKind::Other,
+            ..Default::default()
+        };
+    }
+
+    ProjectMeta::default()
+}
+
+/// Manifests of languages dpl doesn't serve. Checked last, so a Laravel app that
+/// happens to vendor a Go tool is still Laravel.
+const OTHER_MANIFESTS: &[(&str, &str)] = &[
+    ("Cargo.toml", "Rust"),
+    ("go.mod", "Go"),
+    ("Gemfile", "Ruby"),
+    ("pyproject.toml", "Python"),
+    ("requirements.txt", "Python"),
+    ("Package.swift", "Swift"),
+    ("pubspec.yaml", "Dart"),
+    ("mix.exs", "Elixir"),
+];
+
+fn other_language(project: &Path) -> Option<&'static str> {
+    OTHER_MANIFESTS
+        .iter()
+        .find(|(file, _)| project.join(file).is_file())
+        .map(|(_, label)| *label)
+}
+
+/// JavaScript frameworks, most specific first.
+///
+/// Order is the whole design. Every Next.js app depends on `react`, every Nuxt
+/// app on `vue`, and a SvelteKit app on `svelte` — so the meta-framework has to
+/// be checked before the view library, and the view library before the build
+/// tool, or every site in the fleet reports as "React".
+const NODE_FRAMEWORKS: &[(&str, &str)] = &[
+    // Meta-frameworks (they pull in a view library of their own).
+    ("next", "Next.js"),
+    ("nuxt", "Nuxt"),
+    ("@sveltejs/kit", "SvelteKit"),
+    ("astro", "Astro"),
+    ("@remix-run/react", "Remix"),
+    ("gatsby", "Gatsby"),
+    ("@angular/core", "Angular"),
+    ("@docusaurus/core", "Docusaurus"),
+    ("vitepress", "VitePress"),
+    ("vuepress", "VuePress"),
+    ("@11ty/eleventy", "Eleventy"),
+    ("@builder.io/qwik", "Qwik"),
+    // Application platforms.
+    ("@nestjs/core", "NestJS"),
+    ("expo", "Expo"),
+    ("react-native", "React Native"),
+    ("electron", "Electron"),
+    // Servers.
+    ("fastify", "Fastify"),
+    ("hono", "Hono"),
+    ("koa", "Koa"),
+    ("express", "Express"),
+    // View libraries.
+    ("svelte", "Svelte"),
+    ("solid-js", "Solid"),
+    ("vue", "Vue"),
+    ("react", "React"),
+    // Build tooling — the weakest signal, so it goes last.
+    ("vite", "Vite"),
+    ("laravel-mix", "Mix"),
+    ("webpack", "Webpack"),
+];
+
+/// The JavaScript framework a `package.json` describes, with its version
+/// constraint. Looks in `dependencies` and `devDependencies` alike: a Vite or
+/// Astro project keeps its framework in devDependencies, and insisting on the
+/// runtime section would miss exactly the front-end projects this is for.
+fn node_framework_from_package(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let sections = ["dependencies", "devDependencies"];
+    let version_of = |pkg: &str| -> Option<String> {
+        sections.iter().find_map(|section| {
+            value
+                .get(section)?
+                .get(pkg)?
+                .as_str()
+                .map(|v| v.to_string())
+        })
+    };
+    let (label, version) = NODE_FRAMEWORKS
+        .iter()
+        .find_map(|(pkg, label)| version_of(pkg).map(|v| (*label, v)))?;
+    Some(if version.is_empty() { label.to_string() } else { format!("{label} ({version})") })
 }
 
 /// Parse a framework label out of already-read `composer.json` text. A composer
@@ -135,6 +335,11 @@ pub struct ResolvedSite {
     /// preloaded site gets its own php-fpm master. Resolved from `Link.preload`
     /// against the project root; parked sites are always `None`.
     pub preload: Option<PathBuf>,
+    /// package.json script the daemon supervises as this site's dev server.
+    /// `None` = none; parked sites never have one (there is no link to hold it).
+    pub dev: Option<String>,
+    /// User-assigned tags. Parked sites have none — tags live on the link.
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +403,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
     // Links first so they win on name collisions.
     for (name, link) in &config.links {
         let name = name.to_lowercase();
+        let tags = config.tags.get(&name).cloned().unwrap_or_default();
         if !seen.insert(name.clone()) {
             continue;
         }
@@ -210,6 +416,8 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
             source: SiteSource::Linked,
             tld: tld.clone(),
             runtime: link.runtime.clone(),
+            dev: link.dev.clone(),
+            tags,
             xdebug: mode_of(link.xdebug.as_ref()),
             profile: link.profile,
             preload: link.preload.as_ref().map(|p| link.path.join(p)),
@@ -227,6 +435,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
                 continue;
             }
             let Some(name) = name_for(&path) else { continue };
+            let tags = config.tags.get(&name).cloned().unwrap_or_default();
             if name.starts_with('.') || !seen.insert(name.clone()) {
                 continue;
             }
@@ -239,6 +448,8 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
                 source: SiteSource::Parked,
                 tld: tld.clone(),
                 runtime: None,
+                dev: None,
+                tags,
                 xdebug: mode_of(None),
                 profile: false,
                 preload: None,
@@ -257,6 +468,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
 /// parked root otherwise. `None` = no such site anymore.
 pub fn resolve_one(config: &LocalConfig, name: &str) -> Option<ResolvedSite> {
     let name = name.to_lowercase();
+    let tags = config.tags.get(&name).cloned().unwrap_or_default();
     if name.is_empty() || name.starts_with('.') {
         return None;
     }
@@ -277,6 +489,8 @@ pub fn resolve_one(config: &LocalConfig, name: &str) -> Option<ResolvedSite> {
             source: SiteSource::Linked,
             tld,
             runtime: link.runtime.clone(),
+            dev: link.dev.clone(),
+            tags,
             xdebug: mode_of(link.xdebug.as_ref()),
             profile: link.profile,
             preload: link.preload.as_ref().map(|p| link.path.join(p)),
@@ -295,6 +509,8 @@ pub fn resolve_one(config: &LocalConfig, name: &str) -> Option<ResolvedSite> {
                 source: SiteSource::Parked,
                 tld,
                 runtime: None,
+                dev: None,
+                tags,
                 xdebug: mode_of(None),
                 profile: false,
                 preload: None,
@@ -354,6 +570,135 @@ mod tests {
         std::fs::write(dir.join("wp-config.php"), "<?php").unwrap();
         assert_eq!(detect_framework(&dir), Some("WordPress".into()));
         assert_eq!(detect_required_php(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A project dir with a package.json (and optionally a composer.json).
+    fn project_with(files: &[(&str, &str)], tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("dpl-kind-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        dir
+    }
+
+    fn pkg(deps: &str) -> String {
+        format!(r#"{{"name":"x","dependencies":{deps}}}"#)
+    }
+
+    #[test]
+    fn detects_node_frameworks_with_their_versions() {
+        let cases = [
+            (pkg(r#"{"next":"^15.0.1","react":"^19.0.0"}"#), "Next.js (^15.0.1)"),
+            (pkg(r#"{"nuxt":"^3.12.0","vue":"^3.4.0"}"#), "Nuxt (^3.12.0)"),
+            (pkg(r#"{"@sveltejs/kit":"^2.5.0","svelte":"^4.2.0"}"#), "SvelteKit (^2.5.0)"),
+            (pkg(r#"{"@nestjs/core":"^10.0.0"}"#), "NestJS (^10.0.0)"),
+            (pkg(r#"{"express":"^4.19.2"}"#), "Express (^4.19.2)"),
+            (pkg(r#"{"vue":"^3.4.0"}"#), "Vue (^3.4.0)"),
+            (pkg(r#"{"react":"^19.0.0"}"#), "React (^19.0.0)"),
+        ];
+        for (body, expected) in cases {
+            let dir = project_with(&[("package.json", &body)], "fw");
+            let meta = detect_project(&dir);
+            assert_eq!(meta.framework.as_deref(), Some(expected));
+            assert_eq!(meta.kind, ProjectKind::Node);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The ordering invariant: every Next app depends on React and every Nuxt app
+    /// on Vue, so a naive scan reports the whole fleet as React/Vue.
+    #[test]
+    fn the_meta_framework_beats_the_view_library_it_bundles() {
+        let dir = project_with(&[("package.json", &pkg(r#"{"react":"^19.0.0","next":"^15.0.0"}"#))], "order");
+        assert_eq!(detect_project(&dir).framework.as_deref(), Some("Next.js (^15.0.0)"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Astro, Vite and friends live in devDependencies — insisting on runtime
+    /// deps would miss exactly the front-end projects this is for.
+    #[test]
+    fn dev_dependencies_count_too() {
+        let body = r#"{"name":"x","devDependencies":{"astro":"^4.5.0"}}"#;
+        let dir = project_with(&[("package.json", body)], "dev");
+        assert_eq!(detect_project(&dir).framework.as_deref(), Some("Astro (^4.5.0)"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Laravel app with a Vue front end is a Laravel *site* — PHP serves it —
+    /// but the Vue is still worth reporting.
+    #[test]
+    fn php_wins_the_headline_and_node_rides_along() {
+        let dir = project_with(
+            &[
+                ("composer.json", r#"{"require":{"php":"^8.3","laravel/framework":"^12.0"}}"#),
+                ("package.json", &pkg(r#"{"vue":"^3.4.0","vite":"^5.0.0"}"#)),
+            ],
+            "both",
+        );
+        let meta = detect_project(&dir);
+        assert_eq!(meta.framework.as_deref(), Some("Laravel (^12.0)"));
+        assert_eq!(meta.kind, ProjectKind::Php);
+        assert_eq!(meta.requires_php.as_deref(), Some("^8.3"));
+        assert_eq!(meta.node_framework.as_deref(), Some("Vue (^3.4.0)"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_package_json_with_nothing_known_is_still_node() {
+        let dir = project_with(&[("package.json", r#"{"name":"x"}"#)], "bare");
+        let meta = detect_project(&dir);
+        assert_eq!(meta.kind, ProjectKind::Node);
+        assert_eq!(meta.framework.as_deref(), Some("Node"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_of_files_is_static_and_an_empty_one_is_unknown() {
+        let dir = project_with(&[("index.html", "<h1>hi</h1>")], "static");
+        assert_eq!(detect_project(&dir).kind, ProjectKind::Static);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = project_with(&[("README.md", "nothing here")], "empty");
+        let meta = detect_project(&dir);
+        assert_eq!(meta.kind, ProjectKind::Unknown);
+        assert_eq!(meta.framework, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A parked folder full of Rust and Swift checkouts should say so rather
+    /// than showing two dozen identical "unknown" rows.
+    #[test]
+    fn projects_in_other_languages_are_named() {
+        for (file, label) in [("Cargo.toml", "Rust"), ("go.mod", "Go"), ("Package.swift", "Swift")] {
+            let dir = project_with(&[(file, "")], &format!("other-{label}"));
+            let meta = detect_project(&dir);
+            assert_eq!(meta.kind, ProjectKind::Other);
+            assert_eq!(meta.framework.as_deref(), Some(label));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A PHP app that vendors a Go tool is still a PHP app.
+    #[test]
+    fn a_web_manifest_beats_another_languages() {
+        let dir = project_with(
+            &[("composer.json", r#"{"require":{"laravel/framework":"^12.0"}}"#), ("go.mod", "module x")],
+            "mixed",
+        );
+        assert_eq!(detect_project(&dir).kind, ProjectKind::Php);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WordPress has no composer.json but is emphatically a PHP site.
+    #[test]
+    fn wordpress_is_php_even_without_composer() {
+        let dir = project_with(&[("wp-config.php", "<?php")], "wp");
+        let meta = detect_project(&dir);
+        assert_eq!(meta.framework.as_deref(), Some("WordPress"));
+        assert_eq!(meta.kind, ProjectKind::Php);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -34,6 +34,10 @@ Rootless for daily use; elevates once at setup. macOS + Linux.
   and per-site Xdebug modes (one php-fpm pool per mode).
 - **Services** — database engines, mail capture (SMTP sink with per-site
   mailboxes + a MIME/HTML viewer), a debug-dump receiver, and Cloudflare tunnels.
+- **Node** — per-site version pins (`.nvmrc`, driven by fnm/nvm) plus a
+  package-manager fan-out: `dpl node deps` / `dpl node run <script>` across every
+  site with a `package.json`, each through its own agent (npm/pnpm/yarn/bun) and
+  its own Node pin.
 - **Tooling** — `dpl doctor` health checks with one-click fixes, `dpl parity`,
   and Valet import.
 - **GUI** — `DplyLocal.app` (SwiftUI), a native front-end that drives the same

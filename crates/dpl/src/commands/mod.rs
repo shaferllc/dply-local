@@ -2,6 +2,7 @@
 //! sites; `dply` is the platform subtree.
 
 pub mod daemon;
+pub mod dev;
 pub mod doctor;
 pub mod dply;
 pub mod keel;
@@ -11,6 +12,7 @@ pub mod node;
 pub mod parity;
 pub mod preload;
 pub mod profile;
+pub mod tags;
 pub mod valet;
 pub mod xdebug;
 

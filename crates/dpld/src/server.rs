@@ -164,6 +164,34 @@ async fn dispatch(
         Request::SetRuntime { site, runtime } => {
             mutate(state, |r| r.set_runtime(&site, &runtime)).await
         }
+        Request::SetTags { site, tags } => {
+            mutate(state, |r| r.set_tags(&site, &tags)).await
+        }
+        Request::SetDev { site, script } => {
+            mutate(state, |r| r.set_dev(&site, script.as_deref())).await
+        }
+        Request::RestartDev { site } => {
+            mutate(state, |r| r.restart_dev(&site)).await
+        }
+        Request::DevStatus => {
+            let servers = state
+                .registry
+                .lock()
+                .await
+                .dev_statuses()
+                .into_iter()
+                .map(|d| dpl_core::ipc::DevServerInfo {
+                    site: d.site,
+                    script: d.script,
+                    agent: d.agent,
+                    running: d.running,
+                    port: d.port,
+                    detail: d.detail,
+                    log: d.log,
+                })
+                .collect();
+            Response::DevServers { servers }
+        }
         Request::SetXdebug { mode, site, port, ide_key } => {
             mutate(state, |r| {
                 r.set_xdebug(mode.as_deref(), site.as_deref(), port, ide_key.as_deref())

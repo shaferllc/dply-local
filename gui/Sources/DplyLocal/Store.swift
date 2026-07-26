@@ -1063,6 +1063,47 @@ final class Store: ObservableObject {
         await loadLocal()
     }
 
+    /// A site's tags, read off a `dpl sites` row. `nonisolated` because it's a
+    /// pure read of the row — grouping calls it from the view's sync layout path.
+    nonisolated static func tags(of row: Row) -> [String] {
+        row.dig("tags")?.arrayValue?.compactMap { $0.stringValue } ?? []
+    }
+
+    /// Replace a site's tags. The daemon normalises them, so what comes back may
+    /// differ from what was typed — reload rather than assume.
+    func setTags(site: String, tags: [String]) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["tags", "set", site] + tags) }
+        await loadLocal()
+    }
+
+    /// Turn a site's supervised dev server on with `script`, or off with nil.
+    /// The daemon owns the process from here — it restarts it if it dies and it
+    /// outlives the app, so this is a config change, not a launch.
+    func setDevServer(site: String, script: String?) async {
+        let cli = self.cli
+        let args = script.map { ["dev", "on", site, "--script", $0] } ?? ["dev", "off", site]
+        _ = await background { try cli.runRaw(args) }
+        await loadLocal()
+    }
+
+    /// Bounce a site's dev server, clearing any give-up state.
+    func restartDevServer(site: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["dev", "restart", site]) }
+        await loadLocal()
+    }
+
+    /// A site's package.json scripts, for the Run menu. Quiet on failure — a
+    /// site with no readable scripts simply offers none, which is not an error
+    /// worth a banner.
+    func nodeScripts(site: String) async -> [String] {
+        let cli = self.cli
+        let row = await backgroundQuiet { try cli.object(["node", "scripts", site]) }
+        guard let entry = row?.dig("sites")?.arrayValue?.first?.objectValue else { return [] }
+        return entry["scripts"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+    }
+
     // MARK: Branch-aware databases
 
     /// One row of `dpl db branches <site>`: a branch, its database size, and

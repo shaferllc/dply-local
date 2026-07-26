@@ -10,6 +10,10 @@ struct ContentView: View {
     @State private var showValetImport = false
     @State private var showCleanup = false
     @State private var showLinkSheet = false
+    @State private var nodeRun: NodeRunRequest?
+    @AppStorage("siteGrouping") private var grouping: SiteGrouping = .none
+    /// Restrict the list to one group value (a tag, framework, or kind).
+    @State private var groupFilter: String?
     @State private var pendingLinkPath = ""
     @State private var siteSearch = ""
     /// `siteSearch` debounced — what `filteredLocalSites` actually filters on, so
@@ -26,6 +30,11 @@ struct ContentView: View {
         .sheet(isPresented: $showValetImport) { ValetImportSheet().environmentObject(store) }
         .sheet(isPresented: $showCleanup) { SiteCleanupSheet().environmentObject(store) }
         .sheet(isPresented: $showLinkSheet) { LinkFolderSheet(path: pendingLinkPath).environmentObject(store) }
+        .sheet(item: $nodeRun) { run in
+            NodeRunSheet(title: run.title, scope: run.scope, args: run.args,
+                         asksForScript: run.asksForScript)
+                .environmentObject(store)
+        }
         .sheet(isPresented: $store.showOnboarding) {
             OnboardingView(isPresented: $store.showOnboarding).environmentObject(store)
         }
@@ -190,15 +199,40 @@ struct ContentView: View {
         switch store.section {
         case .local:
             List(selection: $selection) {
-                if store.localSites.isEmpty && !store.isLoading {
-                    ContentUnavailableView("No local sites", systemImage: "house",
-                        description: Text("Use ➕ to link a project or park a folder. Each becomes <name>.test."))
+                if visibleLocalSites.isEmpty && !store.isLoading {
+                    ContentUnavailableView(
+                        store.localSites.isEmpty ? "No local sites" : "Nothing matches",
+                        systemImage: "house",
+                        description: Text(store.localSites.isEmpty
+                            ? "Use ➕ to link a project or park a folder. Each becomes <name>.test."
+                            : "No site matches this filter. Clear it to see the rest.")
+                    )
                 }
-                ForEach(filteredLocalSites) { row in
-                    DomainRow(site: row).tag(row.id)
-                        .contextMenu { siteContextMenu(row) }
+                if grouping == .none {
+                    ForEach(visibleLocalSites) { row in
+                        DomainRow(site: row).tag(row.id)
+                            .contextMenu { siteContextMenu(row) }
+                    }
+                } else {
+                    // Grouped: one section per value, each labelled with its count
+                    // so the shape of the fleet is legible at a glance.
+                    ForEach(groupedLocalSites, id: \.key) { group in
+                        Section {
+                            ForEach(group.rows) { row in
+                                DomainRow(site: row).tag(row.id)
+                                    .contextMenu { siteContextMenu(row) }
+                            }
+                        } header: {
+                            HStack {
+                                Text(group.key)
+                                Spacer()
+                                Text("\(group.rows.count)").foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) { groupingBar }
             .searchable(text: $siteSearch, placement: .automatic, prompt: "Filter domains")
             .task(id: siteSearch) {
                 // Debounce: clearing is instant; typing settles after a short
@@ -264,11 +298,94 @@ struct ContentView: View {
     /// Local sites filtered by the search box (name / host / project type).
     private var filteredLocalSites: [Row] {
         guard !debouncedSiteSearch.isEmpty else { return store.localSites }
-        return store.localSites.filter {
-            $0.cell(["name"]).localizedCaseInsensitiveContains(debouncedSiteSearch)
-                || $0.cell(["host"]).localizedCaseInsensitiveContains(debouncedSiteSearch)
-                || $0.cell(["framework"]).localizedCaseInsensitiveContains(debouncedSiteSearch)
+        return store.localSites.filter { row in
+            let haystack = [
+                row.cell(["name"]), row.cell(["host"]), row.cell(["framework"]),
+                row.cell(["node_framework"]), row.cell(["kind"]),
+            ] + Store.tags(of: row)
+            return haystack.contains { $0.localizedCaseInsensitiveContains(debouncedSiteSearch) }
         }
+    }
+
+    /// The search results, narrowed further when a group chip is selected.
+    private var visibleLocalSites: [Row] {
+        guard let groupFilter else { return filteredLocalSites }
+        return filteredLocalSites.filter { grouping.keys(for: $0).contains(groupFilter) }
+    }
+
+    /// Sites bucketed by the current grouping. A site with several tags appears
+    /// under each of them — that's the useful behaviour for tags, and the other
+    /// axes only ever yield one key.
+    private var groupedLocalSites: [(key: String, rows: [Row])] {
+        var buckets: [String: [Row]] = [:]
+        for row in visibleLocalSites {
+            for key in grouping.keys(for: row) {
+                buckets[key, default: []].append(row)
+            }
+        }
+        return buckets
+            .map { (key: $0.key, rows: $0.value) }
+            // Biggest group first, alphabetical within a size — but always park
+            // the catch-all bucket at the bottom, where an "Untagged" pile of 60
+            // can't push the meaningful groups off screen.
+            .sorted {
+                let aCatchAll = $0.key == grouping.catchAll
+                let bCatchAll = $1.key == grouping.catchAll
+                if aCatchAll != bCatchAll { return bCatchAll }
+                if $0.rows.count != $1.rows.count { return $0.rows.count > $1.rows.count }
+                return $0.key.localizedStandardCompare($1.key) == .orderedAscending
+            }
+    }
+
+    /// Grouping picker plus the active-filter chip.
+    private var groupingBar: some View {
+        HStack(spacing: 6) {
+            Menu {
+                ForEach(SiteGrouping.allCases, id: \.self) { option in
+                    Button {
+                        grouping = option
+                        groupFilter = nil
+                    } label: {
+                        if option == grouping { Label(option.label, systemImage: "checkmark") }
+                        else { Text(option.label) }
+                    }
+                }
+            } label: {
+                Label(grouping == .none ? "Group" : grouping.label, systemImage: "square.stack.3d.up")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            if grouping != .none {
+                Menu {
+                    Button("All") { groupFilter = nil }
+                    Divider()
+                    ForEach(availableGroupKeys, id: \.self) { key in
+                        Button(key) { groupFilter = key }
+                    }
+                } label: {
+                    Text(groupFilter ?? "All").font(.caption)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+
+            Spacer()
+            Text("\(visibleLocalSites.count)").font(.caption2).foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.bar)
+    }
+
+    /// Every group value present in the current search results.
+    private var availableGroupKeys: [String] {
+        var seen = Set<String>()
+        for row in filteredLocalSites {
+            for key in grouping.keys(for: row) { seen.insert(key) }
+        }
+        return seen.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     private func siteList(
@@ -435,6 +552,38 @@ struct ContentView: View {
                     Image(systemName: "plus")
                 }
                 .help("Add a local site or proxy")
+            }
+            // Fleet-wide package-manager runs. Each site still gets its own
+            // agent and Node pin — see `dpl node deps`.
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Install dependencies…") {
+                        nodeRun = NodeRunRequest(
+                            title: "Install dependencies",
+                            scope: "all sites",
+                            args: ["node", "deps"]
+                        )
+                    }
+                    Button("Install from lockfiles only…") {
+                        nodeRun = NodeRunRequest(
+                            title: "Install dependencies (frozen lockfile)",
+                            scope: "all sites",
+                            args: ["node", "deps", "--frozen"]
+                        )
+                    }
+                    Divider()
+                    Button("Run a script…") {
+                        nodeRun = NodeRunRequest(
+                            title: "Run script",
+                            scope: "all sites",
+                            args: ["node", "run"],
+                            asksForScript: true
+                        )
+                    }
+                } label: {
+                    Image(systemName: "shippingbox")
+                }
+                .help("Run npm/pnpm/yarn/bun across every site with a package.json")
             }
         }
         if store.section == .mail && !store.mailMessages.isEmpty {

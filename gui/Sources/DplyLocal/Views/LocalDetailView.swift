@@ -246,14 +246,223 @@ struct LocalDetailView: View {
         }
     }
 
+    // MARK: Tags
+
+    @State private var tagDraft = ""
+    @State private var tagsBusy = false
+    private var tags: [String] { Store.tags(of: site) }
+
+    /// Free-form labels for this site. The one grouping axis detection can't
+    /// reach — which client it's for, whether it's archived, what's mid-rewrite.
+    @ViewBuilder
+    private var tagsSection: some View {
+        DetailSection(title: "Tags") {
+            VStack(alignment: .leading, spacing: 8) {
+                if tags.isEmpty {
+                    Text("No tags. Group this site with others by giving it one.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    // A wrapping row, so twenty tags don't run off the pane.
+                    FlowRow(spacing: 5) {
+                        ForEach(tags, id: \.self) { tag in
+                            HStack(spacing: 3) {
+                                Text(tag).font(.system(size: 10, weight: .medium))
+                                Button {
+                                    Task { await save(tags.filter { $0 != tag }) }
+                                } label: {
+                                    Image(systemName: "xmark").font(.system(size: 7, weight: .bold))
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Theme.violet.opacity(0.16), in: Capsule())
+                            .foregroundStyle(Theme.violet)
+                        }
+                    }
+                }
+                HStack(spacing: 6) {
+                    TextField("Add a tag", text: $tagDraft, prompt: Text("client-x"))
+                        .textFieldStyle(.roundedBorder).frame(width: 160)
+                        .onSubmit { Task { await addTag() } }
+                    Button("Add") { Task { await addTag() } }
+                        .buttonStyle(.bordered)
+                        .disabled(tagDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                    if tagsBusy { ProgressView().controlSize(.small) }
+                    Spacer()
+                }
+                .disabled(tagsBusy)
+                Text("Lowercased and hyphenated on save, so one idea stays one tag. Group the sidebar by tag to use them.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func addTag() async {
+        let new = tagDraft.trimmingCharacters(in: .whitespaces)
+        guard !new.isEmpty else { return }
+        tagDraft = ""
+        await save(tags + [new])
+    }
+
+    private func save(_ next: [String]) async {
+        tagsBusy = true
+        await store.setTags(site: name, tags: next)
+        tagsBusy = false
+    }
+
     // MARK: Node
 
     @State private var nodeBusy = false
     @State private var editingNode = false
     @State private var nodeDraft = ""
+    @State private var scripts: [String] = []
+    @State private var nodeRun: NodeRunRequest?
     private var nodeVersion: String? { site.first(["node"]) }
     private var nodeSource: String? { site.first(["node_source"]) }
     private let nodePicks = ["22", "20", "18"]
+
+    /// The package manager this repo calls for. `nil` means no package.json, so
+    /// there are no dependencies to install and no scripts to run.
+    private var nodeAgent: String? { site.first(["node_agent"]) }
+    private var nodeAgentSource: String? { site.first(["node_agent_source"]) }
+
+    // MARK: Dev server
+
+    @State private var devBusy = false
+    /// The script the daemon supervises for this site, if any.
+    private var devScript: String? { site.first(["dev"]) }
+    private var devRunning: Bool { site.dig("dev_running") == .bool(true) }
+    private var devPort: String? { site.first(["dev_port"]) }
+    /// What to start when the toggle goes on: the conventional `dev`, else
+    /// whatever the project actually defines.
+    private var defaultDevScript: String? {
+        scripts.contains("dev") ? "dev" : scripts.first
+    }
+
+    /// The supervised dev server. Unlike the Run menu above, this is a *setting*
+    /// — the daemon keeps the process alive across app restarts, so the control
+    /// is a toggle rather than a button that opens a window you mustn't close.
+    @ViewBuilder
+    private var devServerRow: some View {
+        HStack(spacing: 8) {
+            Toggle("Dev server", isOn: Binding(
+                get: { devScript != nil },
+                set: { on in
+                    Task {
+                        devBusy = true
+                        await store.setDevServer(site: name, script: on ? defaultDevScript : nil)
+                        devBusy = false
+                    }
+                }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .disabled(devBusy || (devScript == nil && defaultDevScript == nil))
+
+            if let script = devScript {
+                Menu(script) {
+                    ForEach(scripts, id: \.self) { candidate in
+                        Button(candidate) {
+                            Task {
+                                devBusy = true
+                                await store.setDevServer(site: name, script: candidate)
+                                devBusy = false
+                            }
+                        }
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 74)
+                .disabled(devBusy)
+
+                if devRunning {
+                    if let port = devPort, !port.isEmpty {
+                        Button("localhost:\(port)") { store.openURL("http://localhost:\(port)") }
+                            .buttonStyle(.link)
+                            .help("Open the dev server")
+                    } else {
+                        // Watchers and type-checkers never listen on anything;
+                        // that's normal, not a fault worth flagging.
+                        Label("running", systemImage: "circle.fill")
+                            .font(.caption2).foregroundStyle(Theme.live).labelStyle(.titleAndIcon)
+                    }
+                } else {
+                    Label("stopped", systemImage: "circle.fill")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+
+                Button {
+                    Task { devBusy = true; await store.restartDevServer(site: name); devBusy = false }
+                } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).disabled(devBusy)
+                    .help("Restart the dev server")
+
+                Button {
+                    nodeRun = NodeRunRequest(
+                        title: "Dev server logs",
+                        scope: name,
+                        args: ["dev", "logs", name]
+                    )
+                } label: { Image(systemName: "doc.plaintext") }
+                    .buttonStyle(.borderless)
+                    .help("What the dev server has printed")
+            } else if defaultDevScript == nil {
+                Text("no scripts to run").font(.caption2).foregroundStyle(.secondary)
+            }
+            if devBusy { ProgressView().controlSize(.small) }
+            Spacer()
+        }
+    }
+
+    /// Dependency install / script running for this one site. Everything here
+    /// shells out to `dpl node …`, so the buttons do exactly what the documented
+    /// commands do — including picking the right agent per repo.
+    @ViewBuilder
+    private var nodeActions: some View {
+        if let agent = nodeAgent {
+            Divider().padding(.vertical, 2)
+            devServerRow
+            Text("The daemon keeps this running and restarts it if it dies — it isn't tied to this window. PHP still serves the site; the dev server is a side-car on its own port.")
+                .font(.caption2).foregroundStyle(.secondary)
+            Divider().padding(.vertical, 2)
+            HStack(spacing: 6) {
+                Button {
+                    nodeRun = NodeRunRequest(
+                        title: "Install dependencies",
+                        scope: name,
+                        args: ["node", "deps", "--site", name]
+                    )
+                } label: { Label("Install", systemImage: "arrow.down.circle") }
+                    .buttonStyle(.bordered)
+                    .help("\(agent) install in this site, under its Node pin")
+
+                Menu {
+                    if scripts.isEmpty {
+                        Text("No scripts in package.json")
+                    } else {
+                        ForEach(scripts, id: \.self) { script in
+                            Button(script) {
+                                nodeRun = NodeRunRequest(
+                                    title: "Run \(script)",
+                                    scope: name,
+                                    args: ["node", "run", "--site", name, script]
+                                )
+                            }
+                        }
+                    }
+                } label: { Label("Run", systemImage: "play") }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 78)
+                    .disabled(scripts.isEmpty)
+
+                Spacer()
+                Text("\(agent)\(nodeAgentSource.map { " · \($0)" } ?? "")")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .help("Detected from this repo — override per run with `dpl node deps --agent`")
+            }
+            .task(id: name) { scripts = await store.nodeScripts(site: name) }
+        }
+    }
 
     /// Per-site Node version — writes the repo's `.nvmrc`; fnm/nvm switch on `cd`.
     @ViewBuilder
@@ -306,9 +515,14 @@ struct LocalDetailView: View {
                 Text(store.nodeManager.map { "\($0) switches to this version when you `cd` in." }
                     ?? "Install fnm or nvm to auto-switch when you `cd` in.")
                     .font(.caption2).foregroundStyle(.secondary)
+                nodeActions
             }
         }
         .task { if store.nodeManager == nil { await store.loadNodeManager() } }
+        .sheet(item: $nodeRun) { run in
+            NodeRunSheet(title: run.title, scope: run.scope, args: run.args)
+                .environmentObject(store)
+        }
     }
 
     private func pinNode(_ version: String) async {
@@ -530,6 +744,8 @@ struct LocalDetailView: View {
                 }
 
                 SiteProjectSection(projectPath: site.cell(["path"])).environmentObject(store)
+
+                if isLinked { tagsSection }
 
                 if !isProxy {
                     xdebugSection

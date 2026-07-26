@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use dpl_core::config::LocalConfig;
@@ -63,9 +63,24 @@ struct RouteInfo {
 /// like `xdebug_installed`/`spx_installed`.
 #[derive(Default, Clone)]
 struct SiteMeta {
-    framework: Option<String>,
-    requires_php: Option<String>,
+    /// Framework, project kind, required PHP, and the JavaScript framework —
+    /// everything read from the project's manifests in one pass.
+    project: dpl_core::sites::ProjectMeta,
     node: Option<dpl_core::node::Pin>,
+    /// The site's package manager, `None` when the repo has no `package.json`.
+    /// Detected here rather than per request: it stats a handful of lockfiles
+    /// and may read package.json, which is exactly the per-site file work this
+    /// cache exists to keep off the `dpl sites` path.
+    agent: Option<dpl_core::node::AgentChoice>,
+}
+
+/// The package manager a site's repo calls for, or `None` when it has no
+/// `package.json` — the distinction the GUI needs to decide whether a site has
+/// any Node actions to offer at all.
+fn detect_site_agent(path: &Path) -> Option<dpl_core::node::AgentChoice> {
+    path.join("package.json")
+        .is_file()
+        .then(|| dpl_core::node::detect_agent(path))
 }
 
 pub struct Registry {
@@ -73,6 +88,8 @@ pub struct Registry {
     config_path: PathBuf,
     fpm: FpmManager,
     appservers: crate::appserver::AppServers,
+    /// Supervised Node dev servers, one per opted-in site (see `dpl dev`).
+    devservers: crate::devserver::DevServers,
     routes: BTreeMap<String, RouteInfo>,
     /// Configured TLDs (cached from config for the request hot path).
     tlds: Vec<String>,
@@ -102,6 +119,7 @@ impl Registry {
             config_path,
             fpm: FpmManager::new(),
             appservers: crate::appserver::AppServers::new(),
+            devservers: crate::devserver::DevServers::new(),
             routes: BTreeMap::new(),
             tlds,
             xdebug_installed: BTreeMap::new(),
@@ -195,13 +213,17 @@ impl Registry {
                 // since the last reconcile (not yet cached) falls back to
                 // reading them directly — correct, just not yet cheap.
                 let meta = self.site_meta.get(&s.name);
-                let (framework, requires_php) = match meta {
-                    Some(m) => (m.framework.clone(), m.requires_php.clone()),
-                    None => sites::detect_meta(&s.path),
+                let project = match meta {
+                    Some(m) => m.project.clone(),
+                    None => sites::detect_project(&s.path),
                 };
                 let node_pin = match meta {
                     Some(m) => m.node.clone(),
                     None => dpl_core::node::read_pin(&s.path),
+                };
+                let agent = match meta {
+                    Some(m) => m.agent.clone(),
+                    None => detect_site_agent(&s.path),
                 };
                 // Show the preload script as configured (relative to the project).
                 let link = self.config.links.get(&s.name);
@@ -211,6 +233,9 @@ impl Registry {
                 let (database, db_branch) = link
                     .map(|l| (l.database.clone(), l.db_branch.clone()))
                     .unwrap_or((None, None));
+                // Read before the struct literal moves `s.name`.
+                let dev_running = self.devservers.is_running(&s.name);
+                let dev_port = self.devservers.port(&s.name);
                 SiteInfo {
                     host: s.host(),
                     url: s.url(),
@@ -222,8 +247,11 @@ impl Registry {
                     secure: s.secure,
                     serving,
                     runtime: s.runtime,
-                    framework,
-                    requires_php,
+                    framework: project.framework,
+                    requires_php: project.requires_php,
+                    kind: Some(project.kind.as_str().to_string()),
+                    node_framework: project.node_framework,
+                    tags: s.tags,
                     xdebug: Some(s.xdebug.to_string()),
                     xdebug_installed,
                     profile: s.profile,
@@ -231,6 +259,11 @@ impl Registry {
                     preload,
                     node: node_pin.as_ref().map(|p| p.version.clone()),
                     node_source: node_pin.as_ref().map(|p| p.source.as_str().to_string()),
+                    node_agent: agent.as_ref().map(|a| a.agent.as_str().to_string()),
+                    node_agent_source: agent.as_ref().map(|a| a.reason.as_str().to_string()),
+                    dev: s.dev,
+                    dev_running,
+                    dev_port,
                     database,
                     db_branch,
                 }
@@ -261,6 +294,14 @@ impl Registry {
                 preload: None,
                 node: None,
                 node_source: None,
+                node_agent: None,
+                node_agent_source: None,
+                dev: None,
+                dev_running: false,
+                dev_port: None,
+                kind: None,
+                node_framework: None,
+                tags: Vec::new(),
                 database: None,
                 db_branch: None,
             });
@@ -344,9 +385,10 @@ impl Registry {
         self.site_meta = resolved
             .iter()
             .map(|s| {
-                let (framework, requires_php) = sites::detect_meta(&s.path);
+                let project = sites::detect_project(&s.path);
                 let node = dpl_core::node::read_pin(&s.path);
-                (s.name.clone(), SiteMeta { framework, requires_php, node })
+                let agent = detect_site_agent(&s.path);
+                (s.name.clone(), SiteMeta { project, node, agent })
             })
             .collect();
 
@@ -364,6 +406,17 @@ impl Registry {
             }
         }
         self.appservers.retain(&octane_sites);
+
+        // Start/stop supervised dev servers. Unlike Octane these never affect
+        // routing — a dev server is a side-car, not the site's backend.
+        let mut dev_sites: BTreeSet<String> = BTreeSet::new();
+        for site in resolved.iter() {
+            if let Some(script) = site.dev.as_deref().filter(|s| !s.is_empty()) {
+                self.devservers.ensure(&site.name, script, &site.path);
+                dev_sites.insert(site.name.clone());
+            }
+        }
+        self.devservers.retain(&dev_sites);
 
         // Rebuild routes.
         self.routes.clear();
@@ -432,9 +485,26 @@ impl Registry {
                     None
                 };
 
-                self.site_meta.insert(name.clone(), {
-                    let (framework, requires_php) = sites::detect_meta(&site.path);
-                    SiteMeta { framework, requires_php, node: dpl_core::node::read_pin(&site.path) }
+                match site.dev.as_deref().filter(|s| !s.is_empty()) {
+                    Some(script) => self.devservers.ensure(&site.name, script, &site.path),
+                    // Turned off (or the site was unlinked): stop this one
+                    // without disturbing every other site's dev server.
+                    None => {
+                        let keep: BTreeSet<String> = self
+                            .devservers
+                            .statuses()
+                            .into_iter()
+                            .map(|d| d.site)
+                            .filter(|s| s != &site.name)
+                            .collect();
+                        self.devservers.retain(&keep);
+                    }
+                }
+
+                self.site_meta.insert(name.clone(), SiteMeta {
+                    project: sites::detect_project(&site.path),
+                    node: dpl_core::node::read_pin(&site.path),
+                    agent: detect_site_agent(&site.path),
                 });
                 self.routes.insert(
                     name,
@@ -452,6 +522,14 @@ impl Registry {
             None => {
                 self.routes.remove(&name);
                 self.site_meta.remove(&name);
+                let keep: BTreeSet<String> = self
+                    .devservers
+                    .statuses()
+                    .into_iter()
+                    .map(|d| d.site)
+                    .filter(|s| s != &name)
+                    .collect();
+                self.devservers.retain(&keep);
             }
         }
 
@@ -544,6 +622,7 @@ impl Registry {
         self.config.links.insert(
             name.clone(),
             dpl_core::config::Link {
+                dev: None,
                 path: path.clone(),
                 php: None,
                 secure: false,
@@ -612,7 +691,7 @@ impl Registry {
             let Ok(path) = canonicalize(path) else { continue };
             self.config.links.insert(
                 name.to_lowercase(),
-                dpl_core::config::Link { path, php: None, secure: false, runtime: None, xdebug: None, profile: false, preload: None, database: None, db_branch: None, db_port: None },
+                dpl_core::config::Link { path, php: None, secure: false, runtime: None, dev: None, xdebug: None, profile: false, preload: None, database: None, db_branch: None, db_port: None },
             );
             linked_ok += 1;
         }
@@ -850,11 +929,120 @@ impl Registry {
         self.config = LocalConfig::load(&self.config_path)?;
         self.fpm.retain(&BTreeSet::new());
         self.appservers.retain(&BTreeSet::new());
+        self.devservers.retain(&BTreeSet::new());
         // Kill stray php-fpm masters from previously-crashed daemons.
         crate::fpm::FpmManager::kill_orphans();
         let n = self.reconcile();
         Ok(format!("Repaired backends — restarted php-fpm{}. Serving {n} site(s).",
             if self.appservers_active() { " + Octane servers" } else { "" }))
+    }
+
+    /// Turn a site's supervised dev server on (with a package.json script) or
+    /// off. The script is checked against the project so a typo fails here,
+    /// loudly, instead of becoming a background process that dies five times and
+    /// gives up quietly.
+    pub fn set_dev(&mut self, site: &str, script: Option<&str>) -> Result<String> {
+        let site = site.to_lowercase();
+        let link = self
+            .config
+            .links
+            .get_mut(&site)
+            .with_context(|| format!("no linked site named `{site}` (dev servers apply to linked sites)"))?;
+        let project = link.path.clone();
+
+        match script {
+            Some(script) => {
+                if !project.join("package.json").is_file() {
+                    anyhow::bail!("`{site}` has no package.json — nothing to run a dev server from.");
+                }
+                let available = dpl_core::node::read_scripts(&project);
+                if !available.iter().any(|s| s == script) {
+                    anyhow::bail!(
+                        "`{site}` has no `{script}` script. It defines: {}.",
+                        if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+                    );
+                }
+                link.dev = Some(script.to_string());
+                self.save()?;
+                self.reconcile_site(&site);
+                let agent = dpl_core::node::detect_agent(&project).agent.as_str().to_string();
+                Ok(format!(
+                    "`{site}` dev server on — `{agent} run {script}`, supervised. \
+                     It restarts if it dies; `dpl dev` shows where it's listening."
+                ))
+            }
+            None => {
+                link.dev = None;
+                self.save()?;
+                self.reconcile_site(&site);
+                Ok(format!("`{site}` dev server off."))
+            }
+        }
+    }
+
+    /// Replace a linked site's tags. Tags are normalised here, at the one place
+    /// they enter the config, so every reader downstream can assume they're
+    /// already lowercase, deduped and sorted.
+    pub fn set_tags(&mut self, site: &str, tags: &[String]) -> Result<String> {
+        let site = site.to_lowercase();
+        let tags = dpl_core::config::normalize_tags(tags);
+        // Any served site can be tagged, parked ones included — tags describe
+        // the site, not how it came to exist.
+        if !sites::resolve(&self.config).iter().any(|s| s.name == site) {
+            anyhow::bail!("no local site named `{site}`. See `dpl sites`.");
+        }
+        if tags.is_empty() {
+            // Don't leave empty vectors behind: `dpl tags` and the config file
+            // should show only sites that actually carry tags.
+            self.config.tags.remove(&site);
+        } else {
+            self.config.tags.insert(site.clone(), tags.clone());
+        }
+        self.save()?;
+        // Tags don't affect serving, but `dpl sites` reads them off the resolved
+        // site, so the routing table has to see the new config.
+        self.reconcile_site(&site);
+        Ok(if tags.is_empty() {
+            format!("`{site}` has no tags now.")
+        } else {
+            format!("`{site}` tagged: {}.", tags.join(", "))
+        })
+    }
+
+    /// Every tag in use, with how many sites carry it.
+    pub fn tag_counts(&self) -> Vec<(String, usize)> {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for tags in self.config.tags.values() {
+            for tag in tags {
+                *counts.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+        // Commonest first, alphabetical within a count — the order you'd want to
+        // read a fleet's tags in.
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out
+    }
+
+    /// Restart one site's dev server, clearing any give-up state.
+    pub fn restart_dev(&mut self, site: &str) -> Result<String> {
+        let site = site.to_lowercase();
+        if !self.devservers.restart(&site) {
+            anyhow::bail!("`{site}` has no dev server. Turn one on with `dpl dev on {site}`.");
+        }
+        Ok(format!("`{site}` dev server restarted."))
+    }
+
+    /// Every supervised dev server's current state.
+    pub fn dev_statuses(&self) -> Vec<crate::devserver::DevInfo> {
+        self.devservers.statuses()
+    }
+
+    /// One supervision pass — reap, restart, and pick up announced ports. Driven
+    /// by the daemon's watch loop, because a dev server dying is not a mutation
+    /// and would otherwise go unnoticed until something else reconciled.
+    pub fn supervise_dev(&mut self) {
+        self.devservers.supervise();
     }
 
     /// Whether any Octane server is currently supervised.
@@ -1036,6 +1224,7 @@ impl Registry {
         self.config.links.insert(
             name.clone(),
             dpl_core::config::Link {
+                dev: None,
                 path,
                 php: spec.php.clone(),
                 secure: spec.secure,

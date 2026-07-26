@@ -92,6 +92,19 @@ struct DomainRow: View {
                 Text(subtitle(isProxy: isProxy, framework: framework, php: php, runtime: runtime))
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                // Tags only earn their line when there are some — an empty row
+                // of chips on 60 untagged sites is pure noise.
+                if !Store.tags(of: site).isEmpty {
+                    HStack(spacing: 3) {
+                        ForEach(Store.tags(of: site).prefix(3), id: \.self) { tag in
+                            TagChip(tag)
+                        }
+                        if Store.tags(of: site).count > 3 {
+                            Text("+\(Store.tags(of: site).count - 3)")
+                                .font(.system(size: 9)).foregroundStyle(.tertiary)
+                        }
+                    }
+                }
             }
             Spacer(minLength: 6)
             Image(systemName: isProxy ? "arrow.triangle.branch" : "link")
@@ -105,6 +118,14 @@ struct DomainRow: View {
         if isProxy { return "proxy → \(site.cell(["path"]))" }
         var parts: [String] = []
         if !framework.isEmpty { parts.append(framework) }
+        // A Laravel app with a Vue front end is both; showing only the PHP side
+        // makes a mixed fleet look uniform.
+        let node = site.cell(["node_framework"])
+        if !node.isEmpty { parts.append(node) }
+        // Node-only projects have no PHP to report, so don't invent one.
+        if site.cell(["kind"]) == "node" {
+            return parts.joined(separator: "  ·  ")
+        }
         parts.append(php.isEmpty ? "PHP default" : "PHP \(php)")
         if !runtime.isEmpty && runtime != "fpm" {
             parts.append(runtime.replacingOccurrences(of: "octane-", with: "⚡"))
@@ -231,5 +252,60 @@ struct DetailSection<Content: View>: View {
             content
         }
         .cardSurface()
+    }
+}
+
+/// A small pill for one tag. Deliberately quiet — tags are a scanning aid in a
+/// long list, not the thing you read first.
+struct TagChip: View {
+    let tag: String
+    init(_ tag: String) { self.tag = tag }
+
+    var body: some View {
+        Text(tag)
+            .font(.system(size: 9, weight: .medium))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Theme.violet.opacity(0.16), in: Capsule())
+            .foregroundStyle(Theme.violet)
+            .lineLimit(1)
+    }
+}
+
+/// A horizontal stack that wraps onto new lines when it runs out of width.
+///
+/// SwiftUI has no built-in for this before macOS 16, and tag lists need it: a
+/// site with a dozen tags must not push the detail pane sideways.
+struct FlowRow: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, lineHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maxWidth {
+                x = 0
+                y += lineHeight + spacing
+                lineHeight = 0
+            }
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+        return CGSize(width: proposal.width ?? x, height: y + lineHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, lineHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX {
+                x = bounds.minX
+                y += lineHeight + spacing
+                lineHeight = 0
+            }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
     }
 }

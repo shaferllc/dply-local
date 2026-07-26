@@ -119,6 +119,30 @@ fn run() -> Result<()> {
                 commands::preload::set(home.as_deref(), site, None)
             }
         },
+        Command::Tags { command } => match command {
+            None | Some(cli::TagsCmd::List) => commands::tags::list(home.as_deref(), args.json),
+            Some(cli::TagsCmd::Show { site }) => commands::tags::show(home.as_deref(), site),
+            Some(cli::TagsCmd::Add { site, tags }) => {
+                commands::tags::add(home.as_deref(), site, tags)
+            }
+            Some(cli::TagsCmd::Rm { site, tags }) => {
+                commands::tags::remove(home.as_deref(), site, tags)
+            }
+            Some(cli::TagsCmd::Set { site, tags }) => {
+                commands::tags::set(home.as_deref(), site, tags)
+            }
+        },
+        Command::Dev { command } => match command {
+            None | Some(cli::DevCmd::Status) => commands::dev::status(home.as_deref(), args.json),
+            Some(cli::DevCmd::On { site, script }) => {
+                commands::dev::on(home.as_deref(), site, script)
+            }
+            Some(cli::DevCmd::Off { site }) => commands::dev::off(home.as_deref(), site),
+            Some(cli::DevCmd::Restart { site }) => commands::dev::restart(home.as_deref(), site),
+            Some(cli::DevCmd::Logs { site, lines }) => {
+                commands::dev::logs(home.as_deref(), site, lines)
+            }
+        },
         Command::Node { command } => match command {
             None | Some(cli::NodeCmd::Status) => commands::node::status(home.as_deref(), args.json),
             Some(cli::NodeCmd::Use { version, site }) => {
@@ -126,6 +150,34 @@ fn run() -> Result<()> {
             }
             Some(cli::NodeCmd::Install { version }) => commands::node::install(&version),
             Some(cli::NodeCmd::Detect { site }) => commands::node::detect(home.as_deref(), site),
+            Some(cli::NodeCmd::Deps { fan, frozen }) => commands::node::fan_out(
+                home.as_deref(),
+                fan.into(),
+                commands::node::Job::Install { frozen },
+            ),
+            Some(cli::NodeCmd::Run { fan, script, args: extra }) => commands::node::fan_out(
+                home.as_deref(),
+                fan.into(),
+                commands::node::Job::Script { name: script, extra },
+            ),
+            Some(cli::NodeCmd::Exec { fan, args: words }) => commands::node::fan_out(
+                home.as_deref(),
+                fan.into(),
+                commands::node::Job::Verbatim(words),
+            ),
+            // `npm` is `exec` with the agent nailed down, so the fan-out never
+            // detects its way to pnpm on a site the user asked npm for.
+            Some(cli::NodeCmd::Npm { mut fan, args: words }) => {
+                fan.agent = Some("npm".to_string());
+                commands::node::fan_out(
+                    home.as_deref(),
+                    fan.into(),
+                    commands::node::Job::Verbatim(words),
+                )
+            }
+            Some(cli::NodeCmd::Scripts { site }) => {
+                commands::node::scripts(home.as_deref(), site, args.json)
+            }
         },
         Command::Xdebug { command } => match command {
             None | Some(cli::XdebugCmd::Status) => {
