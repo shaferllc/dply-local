@@ -145,13 +145,23 @@ pub struct Fan {
     pub site: Option<String>,
     /// Force a package manager instead of detecting one per site.
     pub agent: Option<String>,
+    /// Only sites carrying at least one of these tags.
+    pub tags: Vec<String>,
+    /// Only sites of this project kind.
+    pub kind: Option<String>,
     /// Stop at the first site that fails.
     pub fail_fast: bool,
 }
 
 impl From<crate::cli::FanArgs> for Fan {
     fn from(args: crate::cli::FanArgs) -> Self {
-        Fan { site: args.site, agent: args.agent, fail_fast: args.fail_fast }
+        Fan {
+            site: args.site,
+            agent: args.agent,
+            tags: args.tags,
+            kind: args.kind,
+            fail_fast: args.fail_fast,
+        }
     }
 }
 
@@ -209,11 +219,26 @@ pub fn fan_out(home: Option<&str>, fan: Fan, job: Job) -> Result<()> {
         })?),
     };
 
+    // Validate the kind before doing any work, so a typo fails immediately
+    // instead of quietly matching nothing and reading as "no sites".
+    if let Some(kind) = fan.kind.as_deref() {
+        if dpl_core::sites::ProjectKind::parse(kind).is_none() {
+            anyhow::bail!("unknown type `{kind}` — expected php, node, static, other, or unknown.");
+        }
+    }
+
     let named = fan.site.clone();
-    let (targets, skipped) = npm_targets(home, fan.site)?;
+    let filter = Filter { tags: dpl_core::config::normalize_tags(&fan.tags), kind: fan.kind.clone() };
+    let described = filter.describe();
+    let (targets, skipped) = npm_targets(home, fan.site, &filter)?;
     if targets.is_empty() {
         match named {
             Some(name) => anyhow::bail!("{name} has no package.json — nothing to run."),
+            // No count here: `skipped` is measured after filtering, so it would
+            // read "0 sites checked" and imply an empty fleet.
+            None if !filter.is_empty() => {
+                anyhow::bail!("no site with a package.json matches {described}. See `dpl tags`.")
+            }
             None => anyhow::bail!(
                 "no linked site has a package.json ({skipped} site{} checked).",
                 if skipped == 1 { "" } else { "s" }
@@ -246,11 +271,14 @@ pub fn fan_out(home: Option<&str>, fan: Fan, job: Job) -> Result<()> {
         .collect();
 
     println!(
-        "{label} — {} site{}{}{}\n",
+        "{label} — {} site{}{}{}{}\n",
         plan.len(),
         if plan.len() == 1 { "" } else { "s" },
+        // Say what narrowed the run: a filtered fan-out that touches 3 of 67
+        // sites should never look like the fleet only has 3.
+        if filter.is_empty() { String::new() } else { format!(" matching {described}") },
         agent_tally(&plan),
-        if skipped > 0 { format!(", {skipped} without a package.json skipped") } else { String::new() },
+        if skipped > 0 { format!(", {skipped} skipped") } else { String::new() },
     );
 
     let mut failed: Vec<String> = Vec::new();
@@ -310,7 +338,7 @@ pub fn fan_out(home: Option<&str>, fan: Fan, job: Job) -> Result<()> {
 
 /// `dpl node scripts [site]` — the package.json scripts each site can run.
 pub fn scripts(home: Option<&str>, site: Option<String>, json: bool) -> Result<()> {
-    let (targets, _) = npm_targets(home, site)?;
+    let (targets, _) = npm_targets(home, site, &Filter::default())?;
 
     if json {
         let rows: Vec<serde_json::Value> = targets
@@ -367,12 +395,52 @@ fn agent_tally(plan: &[(String, PathBuf, AgentChoice)]) -> String {
     format!(", {}", parts.join(" · "))
 }
 
-/// The sites a fan-out will run in, plus how many were passed over for having no
-/// `package.json` — worth reporting so a surprisingly short run doesn't look
-/// like a lookup bug.
+/// Which sites a fan-out is narrowed to, beyond "has a package.json".
+///
+/// Tags and kind are the same axes the GUI groups by, so `dpl node deps --tag
+/// client-x` is the command-line half of clicking that group — without it, tags
+/// are a label you can read but not act on.
+#[derive(Default)]
+pub struct Filter {
+    /// Normalised; a site matches if it carries *any* of them.
+    pub tags: Vec<String>,
+    pub kind: Option<String>,
+}
+
+impl Filter {
+    fn is_empty(&self) -> bool {
+        self.tags.is_empty() && self.kind.is_none()
+    }
+
+    fn matches(&self, site: &SiteInfo) -> bool {
+        if !self.tags.is_empty() && !self.tags.iter().any(|t| site.tags.contains(t)) {
+            return false;
+        }
+        match &self.kind {
+            Some(kind) => site.kind.as_deref() == Some(kind.as_str()),
+            None => true,
+        }
+    }
+
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.tags.is_empty() {
+            parts.push(format!("tag {}", self.tags.join(" or ")));
+        }
+        if let Some(kind) = &self.kind {
+            parts.push(format!("type {kind}"));
+        }
+        parts.join(" + ")
+    }
+}
+
+/// The sites a fan-out will run in, plus how many were passed over — for having
+/// no `package.json`, or for not matching the filter. Worth reporting so a
+/// surprisingly short run doesn't look like a lookup bug.
 fn npm_targets(
     home: Option<&str>,
     site: Option<String>,
+    filter: &Filter,
 ) -> Result<(Vec<(String, PathBuf)>, usize)> {
     let candidates: Vec<SiteInfo> = match site {
         Some(name) => {
@@ -384,7 +452,10 @@ fn npm_targets(
         }
         // Proxies point at something dpl doesn't own, so there is no repo to
         // run a package manager in.
-        None => list_sites(home)?.into_iter().filter(|s| s.source != "proxy").collect(),
+        None => list_sites(home)?
+            .into_iter()
+            .filter(|s| s.source != "proxy" && filter.matches(s))
+            .collect(),
     };
 
     let total = candidates.len();

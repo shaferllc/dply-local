@@ -565,6 +565,12 @@ pub struct FanArgs {
     /// yarn, or bun.
     #[arg(long)]
     pub agent: Option<String>,
+    /// Only sites carrying this tag. Repeat for any-of (`--tag a --tag b`).
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    /// Only sites of this type: php, node, static, other, unknown.
+    #[arg(long)]
+    pub kind: Option<String>,
     /// Stop at the first site that fails (default: run them all, then report).
     #[arg(long)]
     pub fail_fast: bool,
