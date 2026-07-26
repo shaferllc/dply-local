@@ -2,9 +2,14 @@
 //!
 //! One file at the repo root captures everything dpl knows about a site that
 //! isn't already a repo file (PHP pin, HTTPS, runtime, Xdebug, profiler,
-//! preload, branch-aware database, required services), so a teammate runs
-//! `dpl up` and gets an identical environment. Node is deliberately absent:
-//! the pin already lives in `.nvmrc`/`.node-version`, which the repo carries.
+//! preload, branch-aware database, required services, dev server), so a teammate
+//! runs `dpl up` and gets an identical environment.
+//!
+//! The Node *version* is deliberately absent — that pin already lives in
+//! `.nvmrc`/`.node-version`, which the repo carries. The dev *script* is here,
+//! though, because no repo file says which of a project's scripts should be
+//! supervised: `package.json` lists `dev`, `watch` and `build` without ranking
+//! them, and picking one is a decision about the environment, not the code.
 //!
 //! Semantics are declarative: `dpl up` makes the site match the file exactly —
 //! an absent key means "default/off", not "leave as is" — so re-running it is
@@ -50,6 +55,10 @@ pub struct SiteSpec {
     /// `["postgres", "redis", ...]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<String>,
+    /// package.json script the daemon supervises as this project's dev server
+    /// (see `dpl dev`), e.g. `"dev"`. Absent = no dev server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<String>,
 }
 
 impl SiteSpec {
@@ -85,6 +94,7 @@ mod tests {
             database: Some("myapp".into()),
             db_port: None,
             services: vec!["postgres".into(), "redis".into()],
+            dev: Some("dev".into()),
         };
         let text = spec.to_toml();
         assert_eq!(SiteSpec::from_toml(&text).unwrap(), spec);
@@ -100,7 +110,7 @@ mod tests {
     fn defaults_are_omitted_from_output() {
         let text = SiteSpec { php: Some("8.4".into()), ..Default::default() }.to_toml();
         assert!(text.contains("php = \"8.4\""));
-        for absent in ["secure", "profile", "runtime", "database", "services", "name"] {
+        for absent in ["secure", "profile", "runtime", "database", "services", "name", "dev"] {
             assert!(!text.contains(absent), "default field `{absent}` leaked into output:\n{text}");
         }
     }

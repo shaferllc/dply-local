@@ -1205,6 +1205,23 @@ impl Registry {
             }
             None => None,
         };
+        // A dev script that doesn't exist would become a supervised process that
+        // dies five times and gives up quietly — degrade loudly instead, exactly
+        // as `preload` does for a missing script.
+        let dev = match &spec.dev {
+            Some(script) if dpl_core::node::read_scripts(&path).iter().any(|s| s == script) => {
+                Some(script.clone())
+            }
+            Some(script) if !path.join("package.json").is_file() => {
+                warnings.push(format!("ignoring dev: no package.json to run `{script}` from"));
+                None
+            }
+            Some(script) => {
+                warnings.push(format!("ignoring dev: no `{script}` script in package.json"));
+                None
+            }
+            None => None,
+        };
         if let Some(v) = &spec.php {
             if dpl_core::php::resolve(v).is_none() {
                 warnings.push(format!("PHP {v} isn't installed — the site will run on the default until it is (`dpl php install {v}`)"));
@@ -1224,7 +1241,7 @@ impl Registry {
         self.config.links.insert(
             name.clone(),
             dpl_core::config::Link {
-                dev: None,
+                dev,
                 path,
                 php: spec.php.clone(),
                 secure: spec.secure,
@@ -1265,6 +1282,7 @@ impl Registry {
             database: link.database.clone(),
             db_port: link.db_port,
             services: Vec::new(),
+            dev: link.dev.clone(),
         })
     }
 
