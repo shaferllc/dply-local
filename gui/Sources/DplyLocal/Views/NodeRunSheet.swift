@@ -50,6 +50,9 @@ struct NodeRunSheet: View {
         !running && (!asksForScript || !script.trimmingCharacters(in: .whitespaces).isEmpty)
     }
 
+    /// A follow runs until dismissed, so the footer shouldn't imply it will end.
+    private var isFollowing: Bool { args.contains("--follow") }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
@@ -93,7 +96,10 @@ struct NodeRunSheet: View {
             HStack(spacing: 8) {
                 if running {
                     ProgressView().controlSize(.small)
-                    Text("Running — closing this stops it.").font(.caption).foregroundStyle(.secondary)
+                    // A tail never "finishes", so say what closing does rather
+                    // than leaving it looking like a job stuck at 99%.
+                    Text(isFollowing ? "Live — closing stops following." : "Running — closing this stops it.")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else if let exitStatus {
                     Label(
                         exitStatus == 0 ? "Finished" : "Finished with errors (exit \(exitStatus))",

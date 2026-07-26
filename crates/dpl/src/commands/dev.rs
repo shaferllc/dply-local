@@ -27,7 +27,7 @@ pub fn status(home: Option<&str>, json: bool) -> Result<()> {
     }
 
     let width = servers.iter().map(|s| s.site.len()).max().unwrap_or(4).max(4);
-    println!("{:<width$}  {:<10}  {:<9}  {}", "SITE", "SCRIPT", "STATE", "WHERE", width = width);
+    println!("{:<width$}  {:<10}  {:<9}  WHERE", "SITE", "SCRIPT", "STATE", width = width);
     for s in &servers {
         let state = if s.running { "running" } else { "stopped" };
         let where_ = match (s.running, s.port) {
@@ -66,25 +66,22 @@ pub fn restart(home: Option<&str>, site: String) -> Result<()> {
     send(home, Request::RestartDev { site })
 }
 
-/// `dpl dev logs <site> [--lines N]` — what the dev server has printed.
-pub fn logs(home: Option<&str>, site: String, lines: usize) -> Result<()> {
+/// `dpl dev logs <site> [--lines N] [--follow]` — what the dev server has
+/// printed. Following is the point for a dev server you're actively watching:
+/// a build error appears as you save, not when you re-run the command.
+pub fn logs(home: Option<&str>, site: String, lines: usize, follow: bool) -> Result<()> {
     let site = site.to_lowercase();
     let server = list(home)?
         .into_iter()
         .find(|s| s.site == site)
         .ok_or_else(|| anyhow::anyhow!("`{site}` has no dev server. See `dpl dev`."))?;
 
-    let text = std::fs::read_to_string(&server.log)
-        .map_err(|e| anyhow::anyhow!("couldn't read {}: {e}", server.log))?;
-    let all: Vec<&str> = text.lines().collect();
-    let from = all.len().saturating_sub(lines);
-    for line in &all[from..] {
-        println!("{line}");
-    }
-    if all.is_empty() {
-        println!("(nothing logged yet — {})", server.log);
-    }
-    Ok(())
+    crate::commands::tail_log(
+        std::path::Path::new(&server.log),
+        lines,
+        follow,
+        &format!("{}'s dev server", server.site),
+    )
 }
 
 fn list(home: Option<&str>) -> Result<Vec<DevServerInfo>> {

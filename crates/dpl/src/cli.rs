@@ -637,6 +637,9 @@ pub enum DevCmd {
         /// How many trailing lines to show.
         #[arg(long, default_value_t = 200)]
         lines: usize,
+        /// Keep printing as the dev server writes (Ctrl-C to stop).
+        #[arg(long, short)]
+        follow: bool,
     },
 }
 

@@ -1009,21 +1009,6 @@ impl Registry {
         })
     }
 
-    /// Every tag in use, with how many sites carry it.
-    pub fn tag_counts(&self) -> Vec<(String, usize)> {
-        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-        for tags in self.config.tags.values() {
-            for tag in tags {
-                *counts.entry(tag.clone()).or_insert(0) += 1;
-            }
-        }
-        let mut out: Vec<(String, usize)> = counts.into_iter().collect();
-        // Commonest first, alphabetical within a count — the order you'd want to
-        // read a fleet's tags in.
-        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        out
-    }
-
     /// Restart one site's dev server, clearing any give-up state.
     pub fn restart_dev(&mut self, site: &str) -> Result<String> {
         let site = site.to_lowercase();

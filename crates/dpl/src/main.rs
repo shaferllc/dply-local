@@ -139,8 +139,8 @@ fn run() -> Result<()> {
             }
             Some(cli::DevCmd::Off { site }) => commands::dev::off(home.as_deref(), site),
             Some(cli::DevCmd::Restart { site }) => commands::dev::restart(home.as_deref(), site),
-            Some(cli::DevCmd::Logs { site, lines }) => {
-                commands::dev::logs(home.as_deref(), site, lines)
+            Some(cli::DevCmd::Logs { site, lines, follow }) => {
+                commands::dev::logs(home.as_deref(), site, lines, follow)
             }
         },
         Command::Node { command } => match command {

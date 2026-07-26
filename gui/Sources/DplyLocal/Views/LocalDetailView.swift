@@ -398,10 +398,13 @@ struct LocalDetailView: View {
                     .help("Restart the dev server")
 
                 Button {
+                    // `--follow`: the sheet already streams a long-running
+                    // process and kills it on close, so a live tail costs
+                    // nothing extra and is the right shape for a dev server.
                     nodeRun = NodeRunRequest(
                         title: "Dev server logs",
                         scope: name,
-                        args: ["dev", "logs", name]
+                        args: ["dev", "logs", name, "--follow"]
                     )
                 } label: { Image(systemName: "doc.plaintext") }
                     .buttonStyle(.borderless)

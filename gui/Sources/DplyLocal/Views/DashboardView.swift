@@ -10,6 +10,7 @@ struct DashboardView: View {
     @State private var devServers: [DevServer] = []
     /// Sites whose dev server is mid-action, so the row can disable itself.
     @State private var devBusy: Set<String> = []
+    @State private var devLogs: NodeRunRequest?
 
     private var sitesRunning: Int { store.localSites.filter { $0.dig("serving") == .bool(true) }.count }
     private var servicesActive: Int { store.dbServices.filter { $0.dig("running") == .bool(true) }.count }
@@ -35,6 +36,10 @@ struct DashboardView: View {
         // from under the title bar on first load.
         .defaultScrollAnchor(.top)
         .task { await refresh() }
+        .sheet(item: $devLogs) { run in
+            NodeRunSheet(title: run.title, scope: run.scope, args: run.args)
+                .environmentObject(store)
+        }
     }
 
     // MARK: Header
@@ -194,6 +199,14 @@ struct DashboardView: View {
                     Task { await act(dev.site) { await store.setDevServer(site: dev.site, script: nil) } }
                 } label: { Image(systemName: "stop.fill") }
                     .buttonStyle(.borderless).help("Stop and turn off")
+                Button {
+                    devLogs = NodeRunRequest(
+                        title: "Dev server logs",
+                        scope: dev.site,
+                        args: ["dev", "logs", dev.site, "--follow"]
+                    )
+                } label: { Image(systemName: "doc.plaintext") }
+                    .buttonStyle(.borderless).help("Follow the log")
             }
         }
         .padding(.leading, 4)

@@ -582,39 +582,7 @@ pub fn logs(home: Option<&str>, name: Option<String>, lines: usize, follow: bool
     if !path.exists() {
         anyhow::bail!("no log for `{name}` yet (is the site being served? run `dpl sites`).");
     }
-    // Print the last `lines` lines.
-    let content = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let all: Vec<&str> = content.lines().collect();
-    let start = all.len().saturating_sub(lines);
-    for line in &all[start..] {
-        println!("{line}");
-    }
-    if !follow {
-        return Ok(());
-    }
-
-    // Follow: poll for appended bytes.
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(&path)?;
-    let mut pos = file.seek(SeekFrom::End(0))?;
-    println!("— following {name}.log (Ctrl-C to stop) —");
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(pos);
-        if len < pos {
-            // File was truncated (backend restarted) — re-read from the top.
-            pos = 0;
-        }
-        if len > pos {
-            file.seek(SeekFrom::Start(pos))?;
-            let mut buf = String::new();
-            file.read_to_string(&mut buf)?;
-            print!("{buf}");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            pos = len;
-        }
-    }
+    crate::commands::tail_log(&path, lines, follow, &format!("{name}.log"))
 }
 
 /// Publicly share a local site via a Cloudflare quick tunnel (`cloudflared`).
