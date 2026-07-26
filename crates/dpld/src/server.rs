@@ -185,6 +185,7 @@ async fn dispatch(
                     script: d.script,
                     agent: d.agent,
                     running: d.running,
+                    pgid: d.pgid,
                     port: d.port,
                     detail: d.detail,
                     log: d.log,

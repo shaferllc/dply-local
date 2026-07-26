@@ -7,6 +7,9 @@ struct DashboardView: View {
     @State private var health: [String] = []
     @State private var top: [(name: String, mb: Int, cpu: Double)] = []
     @State private var workers: [WorkerGroup] = []
+    @State private var devServers: [DevServer] = []
+    /// Sites whose dev server is mid-action, so the row can disable itself.
+    @State private var devBusy: Set<String> = []
 
     private var sitesRunning: Int { store.localSites.filter { $0.dig("serving") == .bool(true) }.count }
     private var servicesActive: Int { store.dbServices.filter { $0.dig("running") == .bool(true) }.count }
@@ -113,13 +116,24 @@ struct DashboardView: View {
     }
 
     private var workersCard: some View {
-        let total = workers.reduce(0) { $0 + $1.items.count }
+        let observed = workers.reduce(0) { $0 + $1.items.count }
+        let total = observed + devServers.filter(\.running).count
         return card(title: "Workers", badge: total > 0 ? "\(total) running" : "none",
                     badgeColor: total > 0 ? .green : .secondary) {
             VStack(alignment: .leading, spacing: 8) {
-                if workers.isEmpty {
-                    Text("No Horizon / queue / Reverb / Vite workers detected.")
+                if workers.isEmpty && devServers.isEmpty {
+                    Text("No dev servers, Horizon, queue, Reverb or Vite workers detected.")
                         .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+                }
+                // Supervised first: these are the ones you can act on.
+                if !devServers.isEmpty {
+                    HStack {
+                        Text("DEV SERVERS").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(devServers.filter(\.running).count)/\(devServers.count)")
+                            .font(.caption2.monospacedDigit()).foregroundStyle(.green)
+                    }
+                    ForEach(devServers) { dev in devServerRow(dev) }
                 }
                 ForEach(workers) { group in
                     // Collapse the many processes per project into one row + count.
@@ -142,10 +156,54 @@ struct DashboardView: View {
                     }
                 }
                 Spacer(minLength: 2)
-                Text(workers.isEmpty ? "" : "Nothing needs healing.")
+                Text(workers.isEmpty && devServers.isEmpty ? "" : hint)
                     .font(.caption2).foregroundStyle(.secondary).padding(.top, 2)
             }
         }
+    }
+
+    /// The observed processes can't be controlled from here — say so once,
+    /// rather than leaving the reader to wonder why only some rows have buttons.
+    private var hint: String {
+        if devServers.isEmpty { return "Started outside dpl — restart them where you started them." }
+        if workers.isEmpty { return "Supervised by dpl: these restart themselves if they die." }
+        return "Dev servers are supervised; the rest were started outside dpl."
+    }
+
+    /// One supervised dev server: state, where it's listening, stop/restart.
+    private func devServerRow(_ dev: DevServer) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(dev.running ? Color.green : Color.orange).frame(width: 6, height: 6)
+            Text(dev.site).font(.callout).foregroundStyle(Theme.violet).lineLimit(1)
+            Text(dev.script).font(.caption2).foregroundStyle(.secondary)
+            if let port = dev.port, dev.running {
+                Button("localhost:\(port)") { store.openURL("http://localhost:\(port)") }
+                    .buttonStyle(.link).font(.caption2)
+            } else if !dev.running, let detail = dev.detail {
+                Text(detail).font(.caption2).foregroundStyle(.orange).lineLimit(1)
+            }
+            Spacer()
+            if devBusy.contains(dev.site) {
+                ProgressView().controlSize(.small)
+            } else {
+                Button {
+                    Task { await act(dev.site) { await store.restartDevServer(site: dev.site) } }
+                } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Restart")
+                Button {
+                    Task { await act(dev.site) { await store.setDevServer(site: dev.site, script: nil) } }
+                } label: { Image(systemName: "stop.fill") }
+                    .buttonStyle(.borderless).help("Stop and turn off")
+            }
+        }
+        .padding(.leading, 4)
+    }
+
+    private func act(_ site: String, _ body: () async -> Void) async {
+        devBusy.insert(site)
+        await body()
+        await refresh()
+        devBusy.remove(site)
     }
 
     private var healthCard: some View {
@@ -227,6 +285,10 @@ struct DashboardView: View {
         await store.refreshCurrentSection(force: force)
         health = await store.doctor()
         top = await store.topProcesses()
-        workers = await store.detectWorkers()
+        devServers = await store.devServers()
+        // Hand the supervised process groups to the ps scan so a dev server dpld
+        // owns isn't also listed as an untouchable observed process.
+        let supervised = Set(devServers.compactMap(\.pgid))
+        workers = await store.detectWorkers(excluding: supervised)
     }
 }

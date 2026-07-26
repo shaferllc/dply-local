@@ -219,6 +219,10 @@ pub struct DevServerInfo {
     /// The package manager running it.
     pub agent: String,
     pub running: bool,
+    /// The supervised process group — every process the dev server spawned
+    /// shares it.
+    #[serde(default)]
+    pub pgid: Option<u32>,
     /// The port it announced in its own output, once it has.
     #[serde(default)]
     pub port: Option<u16>,

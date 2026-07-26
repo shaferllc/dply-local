@@ -65,6 +65,11 @@ pub struct DevInfo {
     pub script: String,
     pub agent: String,
     pub running: bool,
+    /// The supervised process group. Everything the dev server spawned shares
+    /// it, so a `ps` scan can tell "this vite is dpl's" from "this vite is one
+    /// you started yourself" — the difference between a row you can stop from
+    /// the app and a row you can only look at.
+    pub pgid: Option<u32>,
     pub port: Option<u16>,
     /// Human explanation when it isn't running (exit status, backoff, gave up).
     pub detail: Option<String>,
@@ -187,6 +192,7 @@ impl DevServers {
                 script: dev.script.clone(),
                 agent: dev.agent.clone(),
                 running: dev.child.is_some(),
+                pgid: dev.pgid,
                 port: dev.port,
                 detail: dev.detail.clone(),
                 log: dev.log.to_string_lossy().into_owned(),

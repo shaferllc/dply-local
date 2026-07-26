@@ -302,6 +302,21 @@ struct WorkerItem: Identifiable { let pid: Int; let name: String; var id: Int { 
 /// A group of workers of one kind (Horizon, Queue, …).
 struct WorkerGroup: Identifiable { let kind: String; let items: [WorkerItem]; var id: String { kind } }
 
+/// A dev server the daemon supervises — the controllable half of the Workers
+/// card, as opposed to the processes we merely observe in `ps`.
+struct DevServer: Identifiable, Equatable {
+    let site: String
+    let script: String
+    let agent: String
+    let running: Bool
+    /// Process group, used to suppress the `ps`-detected duplicate.
+    let pgid: Int?
+    let port: Int?
+    /// Why it isn't running, when it isn't.
+    let detail: String?
+    var id: String { site }
+}
+
 /// Working directory of each pid (via `lsof`), for labeling worker processes.
 func cwds(for pids: [Int]) -> [Int: String] {
     guard !pids.isEmpty else { return [:] }
@@ -2079,15 +2094,42 @@ final class Store: ObservableObject {
     /// Total physical memory, GB.
     var totalMemoryGB: Double { Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824 }
 
+    /// Every supervised dev server, from `dpl dev --json`.
+    func devServers() async -> [DevServer] {
+        let cli = self.cli
+        let row = await backgroundQuiet { try cli.object(["dev"]) }
+        guard let list = row?.dig("servers")?.arrayValue else { return [] }
+        return list.compactMap { entry in
+            guard let o = entry.objectValue, let site = o["site"]?.stringValue else { return nil }
+            return DevServer(
+                site: site,
+                script: o["script"]?.stringValue ?? "dev",
+                agent: o["agent"]?.stringValue ?? "npm",
+                running: o["running"]?.boolValue ?? false,
+                pgid: o["pgid"]?.intValue,
+                port: o["port"]?.intValue,
+                detail: o["detail"]?.stringValue
+            )
+        }
+    }
+
     /// Detect running Laravel/dev workers (Horizon, queues, Reverb, scheduler,
     /// Stripe listener, Vite) grouped by kind, labeled by their project folder.
-    func detectWorkers() async -> [WorkerGroup] {
-        let out = await backgroundQuiet { runProcess("/bin/ps", ["-Ao", "pid=,command="]) } ?? ""
+    ///
+    /// `supervised` carries the process groups dpld owns. Their children show up
+    /// in `ps` like any other worker, and listing them here as well would put the
+    /// same Vite in two places — one row you can stop and one you can't.
+    func detectWorkers(excluding supervised: Set<Int> = []) async -> [WorkerGroup] {
+        // pgid, not just pid: a supervised dev server's *children* are what `ps`
+        // finds, and they share the group rather than the pid.
+        let out = await backgroundQuiet { runProcess("/bin/ps", ["-Ao", "pid=,pgid=,command="]) } ?? ""
         var groups: [String: [WorkerItem]] = [:]
         for raw in out.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard let sp = line.firstIndex(of: " "), let pid = Int(line[..<sp]) else { continue }
-            let cmd = String(line[line.index(after: sp)...])
+            let fields = raw.trimmingCharacters(in: .whitespaces)
+                .split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard fields.count == 3, let pid = Int(fields[0]), let pgid = Int(fields[1]) else { continue }
+            if supervised.contains(pgid) { continue }
+            let cmd = String(fields[2])
             let low = cmd.lowercased()
             guard low.contains("artisan") || low.contains("stripe") || low.contains("vite") else { continue }
             let kind: String? =
