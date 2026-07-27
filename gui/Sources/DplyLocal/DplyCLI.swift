@@ -44,11 +44,18 @@ struct DplyCLI {
     // MARK: Binary resolution
 
     /// Locate the `dpl` binary. Order: explicit override → the *newest* workspace
-    /// build (found relative to this source file) → `dpl` on `PATH`.
+    /// build (found relative to this source file) → the copy inside this app
+    /// bundle → `dpl` on `PATH`.
     ///
     /// Newest, not release-then-debug. Building release once would otherwise pin the
     /// app to that binary forever, silently ignoring every `cargo build` after it —
     /// the app would keep reporting a world that stopped existing, with no clue why.
+    ///
+    /// The bundled copy comes *after* the workspace so `cargo build` still updates
+    /// what a developer's app drives without re-bundling, and *before* `PATH` so a
+    /// downloaded app uses the binary shipped with it: an app and a CLI from
+    /// different versions disagree about the wire protocol, which surfaces as
+    /// fields silently missing rather than as an error.
     func resolveBinary() throws -> String {
         var tried: [String] = []
 
@@ -69,12 +76,28 @@ struct DplyCLI {
             .0
         if let newest { return newest }
 
+        // Shipped alongside the app (see gui/make-app.sh). Absent in a plain
+        // `swift run`, where the workspace build above is what's wanted anyway.
+        let bundled = DplyCLI.bundledBinary
+        tried.append(bundled + " (bundled)")
+        if FileManager.default.isExecutableFile(atPath: bundled) {
+            return bundled
+        }
+
         if let onPath = which("dpl") {
             return onPath
         }
         tried.append("dpl (on $PATH)")
 
         throw DplyError.binaryNotFound(triedPaths: tried)
+    }
+
+    /// `dpl` inside this app bundle: `DplyLocal.app/Contents/Helpers/dpl`, beside
+    /// the `dpld` and `dpl-helper` it expects to find next to itself.
+    static var bundledBinary: String {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/dpl")
+            .path
     }
 
     /// `<workspace>/target/{debug,release}/dpl` for every workspace root we know

@@ -23,6 +23,11 @@ jobs:
         with:
           xcode-version: "16"
 
+      # make-app.sh also builds `dpl`/`dpld`/`dpl-helper` and embeds them, so the
+      # DMG works on a machine without this repo checked out. Pinned rather than
+      # relying on whatever Rust the runner image happens to ship.
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Build the app bundle
         run: cd gui && ./make-app.sh
 

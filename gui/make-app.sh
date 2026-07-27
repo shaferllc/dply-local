@@ -18,6 +18,12 @@ done
 echo "› Building release binary…"
 swift build -c release
 
+# The app drives `dpl`, which drives `dpld` — none of which the bundle used to
+# contain. A downloaded DplyLocal.app therefore worked only on a machine that
+# also had this repo checked out and built. Ship them together.
+echo "› Building CLI + daemon…"
+(cd .. && cargo build --release)
+
 # One source of truth for the version: the workspace Cargo.toml. Sparkle
 # compares CFBundleVersion between the running app and the appcast, so the
 # app, the tag, and the appcast must all agree on this string.
@@ -30,13 +36,29 @@ if [ ! -f AppIcon.icns ] || [ make-icon.swift -nt AppIcon.icns ]; then
   swift make-icon.swift
 fi
 
-APP="$HOME/Desktop/DplyLocal.app"
-echo "› Assembling $APP"
+DEST="$HOME/Desktop/DplyLocal.app"
+# Assemble and sign in the build directory, then move into place.
+#
+# The Desktop is iCloud-synced on some machines, and the file provider stamps
+# `com.apple.FinderInfo` onto anything that lands there. codesign refuses to
+# sign — or verify — a bundle carrying it, so signing *in situ* on the Desktop
+# fails outright. Staging on the repo's own volume keeps the artifact clean at
+# the moment it is created and signed, which is the moment that matters for the
+# DMG; whatever iCloud does to the local copy afterwards is its business.
+APP="$PWD/.build/stage/DplyLocal.app"
+echo "› Assembling $DEST"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks" \
+         "$APP/Contents/Helpers"
 
 cp .build/release/DplyLocal "$APP/Contents/MacOS/DplyLocal"
 cp AppIcon.icns             "$APP/Contents/Resources/AppIcon.icns"
+
+# Contents/Helpers is Apple's location for auxiliary executables. `dpl` finds
+# `dpld` and `dpl-helper` beside itself, so all three have to travel together.
+for bin in dpl dpld dpl-helper; do
+  cp "../target/release/$bin" "$APP/Contents/Helpers/$bin"
+done
 
 # Sparkle rides in Contents/Frameworks; the binary's rpath
 # (@executable_path/../Frameworks, set in Package.swift) finds it there.
@@ -71,7 +93,32 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # Ad-hoc sign for a stable identity.
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+#
+# Two things this has to get right, both of which were silently wrong before:
+#
+# 1. Extended attributes. A bundle assembled on the Desktop picks up
+#    `com.apple.FinderInfo`, and codesign refuses it outright ("resource fork,
+#    Finder information, or similar detritus not allowed"). The failure was
+#    swallowed by `|| true`, leaving a half-signed bundle that failed
+#    `codesign --verify` — which is also what Gatekeeper checks.
+#
+# 2. Signing order. `--deep` is deprecated and doesn't reliably seal nested
+#    code; Apple's rule is inside-out. Now that Contents/Helpers holds three
+#    executables, that stopped being optional.
+xattr -cr "$APP"
+for bin in "$APP"/Contents/Helpers/*; do
+  codesign --force --sign - "$bin" 2>/dev/null
+done
+codesign --force --sign - "$APP/Contents/Frameworks/Sparkle.framework" 2>/dev/null
+codesign --force --sign - "$APP"
+# Fail loudly rather than shipping a bundle Gatekeeper will reject. Checked here,
+# on the staged copy, because this is the artifact the DMG is cut from.
+codesign --verify --deep --strict "$APP"
+echo "› Signed and verified"
+
+rm -rf "$DEST"
+mv "$APP" "$DEST"
+APP="$DEST"
 touch "$APP"
 
 if [ "$INSTALL" = "1" ]; then
