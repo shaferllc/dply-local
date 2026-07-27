@@ -97,6 +97,11 @@ pub struct ProjectMeta {
     /// a Vue front end is a Laravel site *and* a Vue codebase, and hiding the
     /// second fact makes the fleet look more uniform than it is.
     pub node_framework: Option<String>,
+    /// The PHP-side stack built on top of the framework: Filament, Inertia,
+    /// Livewire, Nova. Which one a project uses changes how you work in it far
+    /// more than the Laravel version does, yet a fleet of 56 Laravel apps
+    /// reports 56 identical labels without it.
+    pub stack: Option<String>,
 }
 
 /// Identify a project from its manifests.
@@ -116,6 +121,7 @@ pub fn detect_project(project: &Path) -> ProjectMeta {
             kind: ProjectKind::Php,
             requires_php: required_php_from_composer(&text),
             node_framework,
+            stack: php_stack(&text),
         };
     }
 
@@ -127,6 +133,7 @@ pub fn detect_project(project: &Path) -> ProjectMeta {
             kind: ProjectKind::Php,
             requires_php: None,
             node_framework,
+            stack: None,
         };
     }
 
@@ -138,6 +145,7 @@ pub fn detect_project(project: &Path) -> ProjectMeta {
             kind: ProjectKind::Node,
             requires_php: None,
             node_framework,
+            stack: None,
         };
     }
 
@@ -158,6 +166,48 @@ pub fn detect_project(project: &Path) -> ProjectMeta {
     }
 
     ProjectMeta::default()
+}
+
+/// A package's version constraint from already-read `composer.json` text.
+///
+/// A lightweight, dependency-free scan: find `"pkg"`, then the quoted value
+/// after the following colon. It reads `require` and `require-dev` alike, since
+/// it doesn't distinguish sections — which is what we want here, as Breeze and
+/// friends are dev dependencies that still shape the whole app.
+fn composer_version(text: &str, pkg: &str) -> Option<String> {
+    let key = format!("\"{pkg}\"");
+    let after = &text[text.find(&key)? + key.len()..];
+    let rest = &after[after.find(':')? + 1..];
+    let q1 = rest.find('"')?;
+    let q2 = rest[q1 + 1..].find('"')?;
+    Some(rest[q1 + 1..=q1 + q2].to_string())
+}
+
+/// PHP stacks layered on a framework, most determining first.
+///
+/// Order encodes what actually shapes day-to-day work. Filament is built *on*
+/// Livewire and Jetstream ships *either* Livewire or Inertia, so the more
+/// specific choice has to win or every Filament panel reports as "Livewire".
+/// Below that, the frontend architecture (Inertia vs Livewire) tells you more
+/// about how a page is built than the auth scaffolding does.
+const PHP_STACKS: &[(&str, &str)] = &[
+    ("filament/filament", "Filament"),
+    ("laravel/nova", "Nova"),
+    ("inertiajs/inertia-laravel", "Inertia"),
+    ("livewire/volt", "Volt"),
+    ("livewire/livewire", "Livewire"),
+    ("laravel/jetstream", "Jetstream"),
+    ("laravel/breeze", "Breeze"),
+];
+
+/// The stack a composer project layers on its framework, with its version.
+/// Scans `require` and `require-dev` alike — Breeze is a dev dependency, and
+/// missing it would hide the scaffolding the whole app is shaped by.
+fn php_stack(text: &str) -> Option<String> {
+    PHP_STACKS.iter().find_map(|(pkg, label)| {
+        composer_version(text, pkg)
+            .map(|v| if v.is_empty() { label.to_string() } else { format!("{label} ({v})") })
+    })
 }
 
 /// Manifests of languages dpl doesn't serve. Checked last, so a Laravel app that
@@ -246,16 +296,7 @@ fn node_framework_from_package(text: &str) -> Option<String> {
 /// Parse a framework label out of already-read `composer.json` text. A composer
 /// project with no framework we recognise is still `PHP (Composer)`.
 fn framework_from_composer(text: &str) -> Option<String> {
-    // Lightweight, dependency-free scan: find `"pkg"` then the quoted value
-    // after the following colon (its version constraint).
-    let ver = |pkg: &str| -> Option<String> {
-        let key = format!("\"{pkg}\"");
-        let after = &text[text.find(&key)? + key.len()..];
-        let rest = &after[after.find(':')? + 1..];
-        let q1 = rest.find('"')?;
-        let q2 = rest[q1 + 1..].find('"')?;
-        Some(rest[q1 + 1..=q1 + q2].to_string())
-    };
+    let ver = |pkg: &str| composer_version(text, pkg);
     if let Some(v) = ver("laravel/framework") {
         return Some(format!("Laravel ({v})"));
     }
@@ -679,6 +720,52 @@ mod tests {
             assert_eq!(meta.framework.as_deref(), Some(label));
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn detects_the_laravel_stack_with_its_version() {
+        let cases = [
+            (r#"{"require":{"laravel/framework":"^12.0","filament/filament":"^3.2"}}"#, "Filament (^3.2)"),
+            (r#"{"require":{"laravel/framework":"^12.0","inertiajs/inertia-laravel":"^1.0"}}"#, "Inertia (^1.0)"),
+            (r#"{"require":{"laravel/framework":"^12.0","livewire/livewire":"^3.5"}}"#, "Livewire (^3.5)"),
+            (r#"{"require":{"laravel/nova":"^4.0"}}"#, "Nova (^4.0)"),
+        ];
+        for (body, expected) in cases {
+            let dir = project_with_composer(body);
+            let meta = detect_project(&dir);
+            assert_eq!(meta.stack.as_deref(), Some(expected), "for {body}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Filament is built *on* Livewire, so a naive scan labels every Filament
+    /// panel "Livewire" and the distinction that matters disappears.
+    #[test]
+    fn the_more_specific_stack_wins() {
+        let dir = project_with_composer(
+            r#"{"require":{"laravel/framework":"^12.0","livewire/livewire":"^3.5","filament/filament":"^3.2"}}"#,
+        );
+        assert_eq!(detect_project(&dir).stack.as_deref(), Some("Filament (^3.2)"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Breeze is a dev dependency but shapes the whole app.
+    #[test]
+    fn a_dev_dependency_stack_still_counts() {
+        let dir = project_with_composer(
+            r#"{"require":{"laravel/framework":"^12.0"},"require-dev":{"laravel/breeze":"^2.0"}}"#,
+        );
+        assert_eq!(detect_project(&dir).stack.as_deref(), Some("Breeze (^2.0)"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plain_laravel_app_has_no_stack() {
+        let dir = project_with_composer(r#"{"require":{"laravel/framework":"^12.0"}}"#);
+        let meta = detect_project(&dir);
+        assert_eq!(meta.framework.as_deref(), Some("Laravel (^12.0)"));
+        assert_eq!(meta.stack, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A PHP app that vendors a Go tool is still a PHP app.

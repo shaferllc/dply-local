@@ -12,7 +12,7 @@ struct ContentView: View {
     @State private var showLinkSheet = false
     @State private var nodeRun: NodeRunRequest?
     @AppStorage("siteGrouping") private var grouping: SiteGrouping = .none
-    /// Restrict the list to one group value (a tag, framework, or kind).
+    /// Restrict the list to one group value (a tag, framework, stack, or kind).
     @State private var groupFilter: String?
     @State private var pendingLinkPath = ""
     @State private var siteSearch = ""
@@ -301,7 +301,7 @@ struct ContentView: View {
         return store.localSites.filter { row in
             let haystack = [
                 row.cell(["name"]), row.cell(["host"]), row.cell(["framework"]),
-                row.cell(["node_framework"]), row.cell(["kind"]),
+                row.cell(["node_framework"]), row.cell(["kind"]), row.cell(["stack"]),
             ] + Store.tags(of: row)
             return haystack.contains { $0.localizedCaseInsensitiveContains(debouncedSiteSearch) }
         }

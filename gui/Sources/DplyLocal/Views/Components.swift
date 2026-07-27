@@ -118,6 +118,10 @@ struct DomainRow: View {
         if isProxy { return "proxy → \(site.cell(["path"]))" }
         var parts: [String] = []
         if !framework.isEmpty { parts.append(framework) }
+        // Which stack a Laravel app uses shapes the work more than its version
+        // does, so it sits right after the framework.
+        let stack = site.cell(["stack"])
+        if !stack.isEmpty { parts.append(stack) }
         // A Laravel app with a Vue front end is both; showing only the PHP side
         // makes a mixed fleet look uniform.
         let node = site.cell(["node_framework"])

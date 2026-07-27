@@ -303,6 +303,9 @@ pub struct SiteInfo {
     /// The JavaScript framework, when `framework` is a PHP one.
     #[serde(default)]
     pub node_framework: Option<String>,
+    /// The PHP stack on top of the framework: Filament, Inertia, Livewire, Nova.
+    #[serde(default)]
+    pub stack: Option<String>,
     /// User-assigned tags for grouping and filtering.
     #[serde(default)]
     pub tags: Vec<String>,
