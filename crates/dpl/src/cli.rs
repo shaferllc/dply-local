@@ -603,6 +603,17 @@ pub enum TagsCmd {
         site: String,
         tags: Vec<String>,
     },
+    /// Rename a tag on every site that carries it.
+    Rename {
+        /// Existing tag.
+        from: String,
+        /// What it becomes. Sites already carrying it keep it once.
+        to: String,
+    },
+    /// Remove a tag from every site that carries it.
+    Delete {
+        tag: String,
+    },
 }
 
 /// Dev-server operations. A dev server is a side-car, not a runtime: PHP still

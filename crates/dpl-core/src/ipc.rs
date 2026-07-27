@@ -96,6 +96,10 @@ pub enum Request {
     DevStatus,
     /// Replace a linked site's tags (empty clears them).
     SetTags { site: String, tags: Vec<String> },
+    /// Rename a tag across every site carrying it.
+    RenameTag { from: String, to: String },
+    /// Remove a tag from every site carrying it.
+    DeleteTag { tag: String },
     /// Manage reverse proxies. `action` ∈ set|remove (list is via ListSites).
     Proxy { action: String, name: String, target: Option<String> },
     /// Pin a PHP version for a site (or set the default when `site` is None).

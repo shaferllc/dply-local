@@ -131,6 +131,12 @@ fn run() -> Result<()> {
             Some(cli::TagsCmd::Set { site, tags }) => {
                 commands::tags::set(home.as_deref(), site, tags)
             }
+            Some(cli::TagsCmd::Rename { from, to }) => {
+                commands::tags::rename(home.as_deref(), from, to)
+            }
+            Some(cli::TagsCmd::Delete { tag }) => {
+                commands::tags::delete(home.as_deref(), tag)
+            }
         },
         Command::Dev { command } => match command {
             None | Some(cli::DevCmd::Status) => commands::dev::status(home.as_deref(), args.json),

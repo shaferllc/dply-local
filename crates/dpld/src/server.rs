@@ -167,6 +167,12 @@ async fn dispatch(
         Request::SetTags { site, tags } => {
             mutate(state, |r| r.set_tags(&site, &tags)).await
         }
+        Request::RenameTag { from, to } => {
+            mutate(state, |r| r.rename_tag(&from, &to)).await
+        }
+        Request::DeleteTag { tag } => {
+            mutate(state, |r| r.delete_tag(&tag)).await
+        }
         Request::SetDev { site, script } => {
             mutate(state, |r| r.set_dev(&site, script.as_deref())).await
         }

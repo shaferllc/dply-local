@@ -86,8 +86,22 @@ pub fn set(home: Option<&str>, site: String, tags: Vec<String>) -> Result<()> {
     set_tags(home, current.name, tags)
 }
 
+/// `dpl tags rename <old> <new>` — across the whole fleet, in one call.
+pub fn rename(home: Option<&str>, from: String, to: String) -> Result<()> {
+    send(home, Request::RenameTag { from, to })
+}
+
+/// `dpl tags delete <tag>` — remove it from every site.
+pub fn delete(home: Option<&str>, tag: String) -> Result<()> {
+    send(home, Request::DeleteTag { tag })
+}
+
 fn set_tags(home: Option<&str>, site: String, tags: Vec<String>) -> Result<()> {
-    match daemon::call(Request::SetTags { site, tags }, home)? {
+    send(home, Request::SetTags { site, tags })
+}
+
+fn send(home: Option<&str>, request: Request) -> Result<()> {
+    match daemon::call(request, home)? {
         Response::Message { text } => println!("✓ {text}"),
         Response::Ok => println!("✓ Done."),
         Response::Error { message } => anyhow::bail!("{message}"),

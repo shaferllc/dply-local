@@ -74,6 +74,15 @@ struct SiteMeta {
     agent: Option<dpl_core::node::AgentChoice>,
 }
 
+/// Normalise a single tag, rejecting input that normalises to nothing — `dpl
+/// tags rename "  " x` should fail rather than quietly matching no sites.
+fn one_tag(raw: &str) -> Result<String> {
+    dpl_core::config::normalize_tags([raw])
+        .into_iter()
+        .next()
+        .with_context(|| format!("`{raw}` isn't a usable tag"))
+}
+
 /// The package manager a site's repo calls for, or `None` when it has no
 /// `package.json` — the distinction the GUI needs to decide whether a site has
 /// any Node actions to offer at all.
@@ -1001,14 +1010,77 @@ impl Registry {
             self.config.tags.insert(site.clone(), tags.clone());
         }
         self.save()?;
-        // Tags don't affect serving, but `dpl sites` reads them off the resolved
-        // site, so the routing table has to see the new config.
-        self.reconcile_site(&site);
+        // No reconcile: `site_infos` resolves tags from the config on every
+        // call, and tags change nothing the routing table or the backends care
+        // about. Reconciling here would spawn work for a label change.
         Ok(if tags.is_empty() {
             format!("`{site}` has no tags now.")
         } else {
             format!("`{site}` tagged: {}.", tags.join(", "))
         })
+    }
+
+    /// Rename a tag everywhere it appears.
+    ///
+    /// Normalisation makes one idea one tag; this makes *changing* that idea a
+    /// single operation. Without it a mistyped tag on twenty sites is twenty
+    /// edits, and the tag people actually use ends up being whichever spelling
+    /// was least effort to leave alone.
+    pub fn rename_tag(&mut self, from: &str, to: &str) -> Result<String> {
+        let from = one_tag(from)?;
+        let to = one_tag(to)?;
+        if from == to {
+            anyhow::bail!("`{from}` and `{to}` are the same tag after normalising.");
+        }
+
+        let mut changed = 0usize;
+        let mut merged = 0usize;
+        for tags in self.config.tags.values_mut() {
+            if !tags.iter().any(|t| t == &from) {
+                continue;
+            }
+            // A site already carrying the target ends up with it once, not twice.
+            if tags.iter().any(|t| t == &to) {
+                merged += 1;
+            }
+            tags.retain(|t| t != &from);
+            tags.push(to.clone());
+            tags.sort();
+            tags.dedup();
+            changed += 1;
+        }
+        if changed == 0 {
+            anyhow::bail!("no site carries the tag `{from}`. See `dpl tags`.");
+        }
+        self.save()?;
+        Ok(format!(
+            "Renamed `{from}` → `{to}` on {changed} site{}{}.",
+            if changed == 1 { "" } else { "s" },
+            if merged > 0 { format!(" ({merged} already had `{to}`)") } else { String::new() }
+        ))
+    }
+
+    /// Remove a tag from every site that carries it.
+    pub fn delete_tag(&mut self, tag: &str) -> Result<String> {
+        let tag = one_tag(tag)?;
+        let mut changed = 0usize;
+        for tags in self.config.tags.values_mut() {
+            let before = tags.len();
+            tags.retain(|t| t != &tag);
+            if tags.len() != before {
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            anyhow::bail!("no site carries the tag `{tag}`. See `dpl tags`.");
+        }
+        // Sites left with nothing shouldn't linger as empty entries in the file.
+        self.config.tags.retain(|_, tags| !tags.is_empty());
+        self.save()?;
+        Ok(format!(
+            "Removed `{tag}` from {changed} site{}.",
+            if changed == 1 { "" } else { "s" }
+        ))
     }
 
     /// Restart one site's dev server, clearing any give-up state.
