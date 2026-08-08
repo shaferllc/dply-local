@@ -28,6 +28,22 @@ jobs:
       # relying on whatever Rust the runner image happens to ship.
       - uses: dtolnay/rust-toolchain@stable
 
+      # Sparkle decides whether an update exists by comparing the running app's
+      # CFBundleVersion — which make-app.sh reads from Cargo.toml — against the
+      # appcast's sparkle:version, which is derived from this tag. Nothing else
+      # ties those two together, so tagging v0.6.0 with Cargo.toml still on
+      # 0.5.1 ships an update that every installed app either ignores or
+      # re-offers forever. Catch it here, before a bad release is published.
+      - name: Tag and Cargo.toml must agree
+        run: |
+          FILE=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$FILE" != "$TAG" ]; then
+            echo "::error::tag v$TAG does not match Cargo.toml version $FILE — bump Cargo.toml and re-tag."
+            exit 1
+          fi
+          echo "version $FILE matches tag $GITHUB_REF_NAME"
+
       - name: Build the app bundle
         run: cd gui && ./make-app.sh
 

@@ -121,7 +121,11 @@ struct ShareSheet: View {
         guard let dpl = try? store.cli.resolveBinary() else { output = "dpl not found"; return }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: dpl)
-        proc.arguments = ["share", site]
+        // `quick` explicitly: this sheet is the foreground Cloudflare tunnel that
+        // lives as long as the window is open. Bare `dpl share` now heads a
+        // subcommand tree for permanent Jetty tunnels, and would reject a site
+        // name as an unknown subcommand.
+        proc.arguments = ["share", "quick", site]
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe

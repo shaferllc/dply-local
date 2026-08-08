@@ -587,6 +587,10 @@ fn check_sites(c: &mut Checks, home: Option<&str>, sites: Option<&[SiteInfo]>) {
     } else {
         c.add("sites.paths", cat, "Project folders", Status::Fail, format!("missing: {}", missing.join(", ")));
         c.hint("These sites point at folders that no longer exist. Unlink them, or restore the folder.");
+        // One command rather than an unlink per site: the fix runner executes a
+        // single program with no shell, so a chain of `&&` would never run — and
+        // a button that clears one of three names isn't a fix.
+        c.fix("Unlink missing sites", "dpl unlink --missing");
     }
 
     // A missing docroot means the framework's front controller isn't where we look.
@@ -704,12 +708,76 @@ fn check_tooling(c: &mut Checks) {
 
     optional(c, "tool.brew", "brew", "Homebrew", "dpl installs and repairs PHP versions through Homebrew.", "");
     optional(c, "tool.composer", "composer", "Composer", "Needed to set up Laravel Octane for a site.", "brew install composer");
-    optional(c, "tool.cloudflared", "cloudflared", "cloudflared", "Needed by `dpl share` to expose a site publicly.", "brew install cloudflared");
+    // Two ways to expose a site, and they are alternatives rather than a stack:
+    // `dpl share quick` runs a throwaway Cloudflare tunnel in the foreground,
+    // `dpl share on` keeps a Jetty tunnel on a reserved name. Neither is
+    // required, so a missing one is only worth mentioning against the command
+    // that needs it.
+    optional(
+        c,
+        "tool.cloudflared",
+        "cloudflared",
+        "cloudflared",
+        "Needed by `dpl share quick` for a one-off public URL. Not needed for `dpl share`, which uses Jetty.",
+        "brew install cloudflared",
+    );
+    check_jetty(c, cat);
 
     // Valet isn't a dependency — it's a conflict worth naming when present.
     if let Some(p) = which("valet") {
         c.add("tool.valet", cat, "Laravel Valet", Status::Info, format!("installed at {p}"));
         c.hint("Valet and dpl both want ports 80/443. `dpl takeover` hands them to dpl; `dpl untakeover` gives them back.");
+    }
+}
+
+/// The Jetty CLI, which the daemon drives for permanent public URLs.
+///
+/// Reported in more detail than a plain `which`, because two things about a
+/// Jetty install fail in ways that don't look like an install problem:
+///
+/// * **The daemon can't see a Composer-global install.** dpld runs under
+///   launchd's minimal PATH, so a `jetty` that works in your shell can be
+///   invisible to the process that actually needs it.
+/// * **Several copies drift apart.** A stale build alongside a current one
+///   presents as a tunnel that connects and then dies in a loop — here a
+///   v0.1.60 crashed resuming a tunnel while a v0.1.61 sat beside it.
+fn check_jetty(c: &mut Checks, cat: &str) {
+    // The same places the daemon looks, in the same order.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates: Vec<String> = [
+        format!("{home}/.local/bin/jetty"),
+        format!("{home}/.composer/vendor/bin/jetty"),
+        format!("{home}/.config/composer/vendor/bin/jetty"),
+        "/opt/homebrew/bin/jetty".to_string(),
+        "/usr/local/bin/jetty".to_string(),
+    ]
+    .into_iter()
+    .filter(|p| Path::new(p).is_file())
+    .collect();
+
+    if candidates.is_empty() && which("jetty").is_none() {
+        c.add("tool.jetty", cat, "Jetty CLI", Status::Warn, "not installed");
+        c.hint("Needed by `dpl share` to give a site a permanent public URL.");
+        c.fix("Install it", "composer global require jetty/client");
+        return;
+    }
+
+    let primary = candidates.first().cloned().or_else(|| which("jetty")).unwrap_or_default();
+    if candidates.len() > 1 {
+        c.add(
+            "tool.jetty",
+            cat,
+            "Jetty CLI",
+            Status::Warn,
+            format!("{} installs: {}", candidates.len(), candidates.join(", ")),
+        );
+        c.hint(
+            "Several copies can drift to different versions, and a stale one fails in a way that \
+             looks like a broken tunnel rather than a broken install. dpl uses the first.",
+        );
+        c.fix("Clean them up", "jetty doctor");
+    } else {
+        c.add("tool.jetty", cat, "Jetty CLI", Status::Pass, primary);
     }
 }
 

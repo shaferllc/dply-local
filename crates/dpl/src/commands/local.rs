@@ -93,6 +93,44 @@ pub fn unlink(home: Option<&str>, name: Option<String>) -> Result<()> {
     send_message(home, Request::Unlink { name: resolve_name(name)? })
 }
 
+/// `dpl unlink --missing` — drop every linked site whose folder is gone.
+///
+/// A link outliving its directory is the worst kind of broken: the site still
+/// resolves, still routes, and answers a bare 404 that looks like an app fault
+/// rather than a missing project. `dpl doctor` reports these, and this is the
+/// button it offers.
+///
+/// Only *linked* sites, and only ones whose path is genuinely absent — a parked
+/// directory that vanished takes its sites with it automatically, and a site on
+/// an unmounted volume would be destroyed rather than repaired by unlinking it.
+pub fn unlink_missing(home: Option<&str>) -> Result<()> {
+    let Response::Sites { sites, .. } = daemon::call(Request::ListSites, home)? else {
+        anyhow::bail!("unexpected daemon response");
+    };
+    let gone: Vec<String> = sites
+        .iter()
+        .filter(|s| s.source == "linked" && !s.path.is_empty())
+        .filter(|s| !std::path::Path::new(&s.path).is_dir())
+        .map(|s| s.name.clone())
+        .collect();
+
+    if gone.is_empty() {
+        println!("No linked sites are missing their folder.");
+        return Ok(());
+    }
+
+    println!("Unlinking {}: {}", plural(gone.len(), "site"), gone.join(", "));
+    send_message(home, Request::RemoveSites { parked: Vec::new(), links: gone })
+}
+
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("{n} {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
 pub fn relink(home: Option<&str>, name: String, path: Option<String>) -> Result<()> {
     send_message(home, Request::Relink { name: name.to_lowercase(), path: resolve_path(path)? })
 }

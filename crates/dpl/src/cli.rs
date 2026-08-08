@@ -77,6 +77,11 @@ pub enum Command {
     Unlink {
         /// Site name (default: current directory's name).
         name: Option<String>,
+        /// Unlink every site whose project folder no longer exists. These serve
+        /// a 404 with no explanation, so they are worth clearing in one go
+        /// rather than one `dpl unlink` at a time.
+        #[arg(long, conflicts_with = "name")]
+        missing: bool,
     },
     /// Point a linked site at a different directory, keeping its settings.
     Relink {
