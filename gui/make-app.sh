@@ -36,7 +36,14 @@ if [ ! -f AppIcon.icns ] || [ make-icon.swift -nt AppIcon.icns ]; then
   swift make-icon.swift
 fi
 
-DEST="$HOME/Desktop/DplyLocal.app"
+# Where the finished bundle lands. Decided up front so the staged copy moves
+# to its final home in one hop: an install must never transit the Desktop.
+if [ "$INSTALL" = "1" ]; then
+  DEST="/Applications/DplyLocal.app"
+else
+  DEST="$HOME/Desktop/DplyLocal.app"
+fi
+
 # Assemble and sign in the build directory, then move into place.
 #
 # The Desktop is iCloud-synced on some machines, and the file provider stamps
@@ -44,7 +51,13 @@ DEST="$HOME/Desktop/DplyLocal.app"
 # sign — or verify — a bundle carrying it, so signing *in situ* on the Desktop
 # fails outright. Staging on the repo's own volume keeps the artifact clean at
 # the moment it is created and signed, which is the moment that matters for the
-# DMG; whatever iCloud does to the local copy afterwards is its business.
+# DMG.
+#
+# Staging alone is not enough, though. This used to move stage → Desktop →
+# /Applications, so an installed bundle picked up the file provider's xattrs in
+# passing and arrived unverifiable — after the verify below had already passed
+# on a copy that was no longer the one being installed. Hence the single hop,
+# and the re-verify at the destination.
 APP="$PWD/.build/stage/DplyLocal.app"
 echo "› Assembling $DEST"
 rm -rf "$APP"
@@ -116,18 +129,36 @@ codesign --force --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 echo "› Signed and verified"
 
+if [ "$INSTALL" = "1" ]; then
+  echo "› Installing to $DEST (will quit any running DplyLocal first)"
+  /usr/bin/pkill -x DplyLocal 2>/dev/null || true
+  /bin/sleep 0.3
+fi
+
 rm -rf "$DEST"
 mv "$APP" "$DEST"
 APP="$DEST"
 touch "$APP"
 
+# Verify the artifact that actually landed, not the one we signed. A bundle can
+# acquire `com.apple.FinderInfo` in transit — the iCloud file provider stamps
+# anything arriving on a synced Desktop — and codesign then refuses the whole
+# bundle, which is precisely what Gatekeeper does too. Stripping xattrs does not
+# disturb the signature: they are not sealed, they are what stops it being read.
+xattr -cr "$DEST"
+if codesign --verify --deep --strict "$DEST" 2>/dev/null; then
+  echo "› Verified at $DEST"
+else
+  # A synced Desktop can re-stamp at any moment, so this is a warning there and
+  # a hard failure for an install, which has to be launchable.
+  if [ "$INSTALL" = "1" ]; then
+    echo "✗ $DEST failed signature verification after install" >&2
+    exit 1
+  fi
+  echo "! $DEST carries file-provider xattrs; re-run 'xattr -cr' before cutting a DMG" >&2
+fi
+
 if [ "$INSTALL" = "1" ]; then
-  DEST="/Applications/DplyLocal.app"
-  echo "› Installing to $DEST (will quit any running DplyLocal first)"
-  /usr/bin/pkill -x DplyLocal 2>/dev/null || true
-  /bin/sleep 0.3
-  rm -rf "$DEST"
-  /bin/mv "$APP" "$DEST"
   open "$DEST"
   echo "› Installed and launched."
 else
