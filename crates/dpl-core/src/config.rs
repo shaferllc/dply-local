@@ -230,6 +230,17 @@ pub struct Link {
     /// fleet of long-lived Node processes. See `dpl dev`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dev: Option<String>,
+    /// Reserved Jetty subdomain label giving this site a permanent public URL
+    /// at `<label>.tunnels.usejetty.online`.
+    ///
+    /// `None` = no tunnel, which is the default and stays the default: a tunnel
+    /// is a long-lived agent process holding a WebSocket, and a fleet of them is
+    /// a fleet of connections nobody asked for. The label is stored rather than
+    /// derived from the site name because it is a *reservation* on the Jetty
+    /// side — the name has to be one your team actually holds, and it is what
+    /// keeps the URL stable across restarts. See `dpl share`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<String>,
     /// Xdebug mode for this site (overrides `default_xdebug`). A site with a
     /// mode of its own gets its own php-fpm master.
     #[serde(default, skip_serializing_if = "Option::is_none")]

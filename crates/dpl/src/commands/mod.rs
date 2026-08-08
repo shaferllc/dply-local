@@ -14,6 +14,7 @@ pub mod octane;
 pub mod parity;
 pub mod preload;
 pub mod profile;
+pub mod share;
 pub mod tags;
 pub mod valet;
 pub mod xdebug;

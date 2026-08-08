@@ -77,7 +77,6 @@ fn run() -> Result<()> {
             commands::local::logs(home.as_deref(), name, lines, follow)
         }
         Command::Tinker { site } => commands::local::tinker(home.as_deref(), site),
-        Command::Share { name } => commands::local::share(home.as_deref(), name),
         Command::Start => commands::daemon::manage(home.as_deref(), "start".into()),
         Command::Stop => commands::daemon::manage(home.as_deref(), "stop".into()),
         Command::Reload => commands::local::restart(home.as_deref()),
@@ -92,6 +91,22 @@ fn run() -> Result<()> {
             commands::local::setup(home.as_deref(), !no_ports, as_user.as_deref())
         }
         Command::Runtime { site, runtime } => commands::local::set_runtime(home.as_deref(), site, runtime),
+        Command::Share { command } => match command {
+            None | Some(cli::ShareCmd::Status) => {
+                commands::share::status(home.as_deref(), args.json)
+            }
+            Some(cli::ShareCmd::On { site, label }) => {
+                commands::share::on(home.as_deref(), &site, &label)
+            }
+            Some(cli::ShareCmd::Off { site }) => commands::share::off(home.as_deref(), &site),
+            Some(cli::ShareCmd::Restart { site }) => {
+                commands::share::restart(home.as_deref(), &site)
+            }
+            Some(cli::ShareCmd::Quick { site }) => commands::local::share(home.as_deref(), site),
+            Some(cli::ShareCmd::Logs { site, lines, follow }) => {
+                commands::share::logs(home.as_deref(), &site, lines, follow)
+            }
+        },
         Command::Fpm { command } => match command {
             None | Some(cli::FpmCmd::Status) => commands::fpm::status(home.as_deref(), args.json),
             Some(cli::FpmCmd::Reload) => commands::fpm::reload(home.as_deref()),

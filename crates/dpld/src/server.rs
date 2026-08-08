@@ -268,6 +268,29 @@ async fn dispatch(
             mutate(state, |r| r.use_php(&version, site.as_deref())).await
         }
         Request::Reload => mutate(state, |r| r.reload()).await,
+        Request::ShareStatus => {
+            let shares = state
+                .registry
+                .lock()
+                .await
+                .share_statuses()
+                .into_iter()
+                .map(|s| dpl_core::ipc::ShareStatusInfo {
+                    site: s.site,
+                    label: s.label,
+                    running: s.running,
+                    pgid: s.pgid,
+                    url: s.url,
+                    detail: s.detail,
+                    log: s.log,
+                })
+                .collect();
+            Response::Shares { shares }
+        }
+        Request::SetShare { site, label } => {
+            mutate(state, |r| r.set_share(&site, label.as_deref())).await
+        }
+        Request::RestartShare { site } => mutate(state, |r| r.restart_share(&site)).await,
         Request::FpmStatus => {
             let pools = state.registry.lock().await.fpm_pools();
             Response::FpmPools { pools }

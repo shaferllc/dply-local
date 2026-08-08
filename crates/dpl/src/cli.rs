@@ -145,11 +145,6 @@ pub enum Command {
         /// Site name (default: the current directory).
         site: Option<String>,
     },
-    /// Share a local site publicly via a Cloudflare quick tunnel.
-    Share {
-        /// Site name (default: current directory's name).
-        name: Option<String>,
-    },
     /// Start the dpld daemon.
     Start,
     /// Stop the dpld daemon.
@@ -191,14 +186,19 @@ pub enum Command {
         /// fpm | octane-swoole | octane-roadrunner | octane-frankenphp.
         runtime: String,
     },
-    /// Laravel Octane sites: install one, see what's running, reload the workers
-    /// holding your application in memory, and control the file watching that
-    /// reloads them for you. `dpl octane` with no subcommand lists them.
+    /// Give a site a permanent public URL through a Jetty tunnel.
+    Share {
+        #[command(subcommand)]
+        command: Option<ShareCmd>,
+    },
     /// php-fpm pools: how loaded they are, and reloading or restarting them.
     Fpm {
         #[command(subcommand)]
         command: Option<FpmCmd>,
     },
+    /// Laravel Octane sites: install one, see what's running, reload the workers
+    /// holding your application in memory, and control the file watching that
+    /// reloads them for you. `dpl octane` with no subcommand lists them.
     Octane {
         #[command(subcommand)]
         command: Option<OctaneCmd>,
@@ -617,6 +617,48 @@ pub enum TagsCmd {
     /// Remove a tag from every site that carries it.
     Delete {
         tag: String,
+    },
+}
+
+/// Jetty tunnel operations.
+///
+/// Sharing is opt-in per site. The label is a subdomain your team has reserved
+/// on Jetty (`jetty domains`); reusing it is what keeps the public URL the same
+/// across restarts instead of a fresh random name each time.
+#[derive(Subcommand)]
+pub enum ShareCmd {
+    /// Show every shared site and its public URL (the default).
+    Status,
+    /// Share a site at `<label>.tunnels.usejetty.online`.
+    On {
+        /// Linked site name.
+        site: String,
+        /// Reserved subdomain label. See `jetty domains`.
+        label: String,
+    },
+    /// Stop sharing a site. The label stays reserved, so turning it back on
+    /// later gets the same URL.
+    Off {
+        site: String,
+    },
+    /// Reconnect a site's tunnel, clearing any give-up state.
+    Restart {
+        site: String,
+    },
+    /// One-off public URL via a Cloudflare quick tunnel: no account, no reserved
+    /// name, runs in the foreground until Ctrl-C. The opposite trade-off to a
+    /// Jetty tunnel — nothing to set up, and a URL that is gone afterwards.
+    Quick {
+        /// Site name (default: current directory's name).
+        site: Option<String>,
+    },
+    /// Show the tunnel agent's log for a site.
+    Logs {
+        site: String,
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+        #[arg(short, long)]
+        follow: bool,
     },
 }
 

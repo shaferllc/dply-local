@@ -382,6 +382,9 @@ pub struct ResolvedSite {
     /// package.json script the daemon supervises as this site's dev server.
     /// `None` = none; parked sites never have one (there is no link to hold it).
     pub dev: Option<String>,
+    /// Reserved Jetty subdomain label giving this site a permanent public URL.
+    /// `None` = not shared; parked sites are never shared (no link to hold it).
+    pub share: Option<String>,
     /// User-assigned tags. Parked sites have none — tags live on the link.
     pub tags: Vec<String>,
 }
@@ -462,6 +465,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
             runtime: link.runtime.clone(),
             watch: link.watch.unwrap_or(true),
             dev: link.dev.clone(),
+            share: link.share.clone(),
             tags,
             xdebug: mode_of(link.xdebug.as_ref()),
             profile: link.profile,
@@ -495,6 +499,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
                 runtime: None,
                 watch: true,
                 dev: None,
+                share: None,
                 tags,
                 xdebug: mode_of(None),
                 profile: false,
@@ -537,6 +542,7 @@ pub fn resolve_one(config: &LocalConfig, name: &str) -> Option<ResolvedSite> {
             runtime: link.runtime.clone(),
             watch: link.watch.unwrap_or(true),
             dev: link.dev.clone(),
+            share: link.share.clone(),
             tags,
             xdebug: mode_of(link.xdebug.as_ref()),
             profile: link.profile,
@@ -558,6 +564,7 @@ pub fn resolve_one(config: &LocalConfig, name: &str) -> Option<ResolvedSite> {
                 runtime: None,
                 watch: true,
                 dev: None,
+                share: None,
                 tags,
                 xdebug: mode_of(None),
                 profile: false,

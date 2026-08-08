@@ -14,6 +14,7 @@ mod devserver;
 mod dumps;
 mod fastcgi;
 mod fpm;
+mod jetty;
 mod launchd;
 mod mail;
 mod proxy;
@@ -73,9 +74,15 @@ fn main() -> anyhow::Result<()> {
         // Same for Octane servers: a SIGKILLed daemon never stopped them, and
         // Octane won't start a second server for a project that still has one.
         appserver::AppServers::kill_orphans();
+        // Same for tunnel agents: a stray one still holds its reserved label,
+        // so the new daemon's agent would be refused it.
+        jetty::Tunnels::kill_orphans();
 
         // Build the site registry and start backends for the saved config.
         let mut registry = registry::Registry::load().context("loading registry")?;
+        // Tunnels forward to the proxy, so they need the port it actually bound
+        // — set before the first reconcile, which is what starts them.
+        registry.set_http_port(http_port);
         let serving = registry.reconcile();
         tracing::info!(sites = serving, "initial reconcile complete");
         let registry = Arc::new(Mutex::new(registry));
@@ -164,6 +171,13 @@ fn main() -> anyhow::Result<()> {
             tokio::spawn(async move { fpm::watch(state).await })
         };
 
+        // Keep shared sites' Jetty tunnels connected, so a public URL that is
+        // meant to be permanent behaves like it.
+        let jetty_task = {
+            let state = state.clone();
+            tokio::spawn(async move { jetty::watch(state).await })
+        };
+
         let result = server::run(state).await;
 
         proxy_task.abort();
@@ -175,6 +189,7 @@ fn main() -> anyhow::Result<()> {
         devserver_task.abort();
         appserver_task.abort();
         fpm_task.abort();
+        jetty_task.abort();
         result
     })
 }

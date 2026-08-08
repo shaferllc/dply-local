@@ -113,6 +113,13 @@ pub enum Request {
     Proxy { action: String, name: String, target: Option<String> },
     /// Pin a PHP version for a site (or set the default when `site` is None).
     UsePhp { version: String, site: Option<String> },
+    /// Every supervised Jetty tunnel and its public URL.
+    ShareStatus,
+    /// Turn sharing on for a site with a reserved subdomain label, or off when
+    /// `label` is None.
+    SetShare { site: String, label: Option<String> },
+    /// Reconnect one site's tunnel, clearing any give-up state.
+    RestartShare { site: String },
     /// Every php-fpm pool dpl supervises, with php-fpm's own live counters.
     FpmStatus,
     /// Gracefully reload every php-fpm pool (SIGUSR2). Workers are replaced
@@ -218,6 +225,10 @@ pub enum Response {
     AppServers {
         servers: Vec<AppServerInfo>,
     },
+    /// Supervised Jetty tunnels.
+    Shares {
+        shares: Vec<ShareStatusInfo>,
+    },
     /// php-fpm pools and their live counters.
     FpmPools {
         pools: Vec<FpmPoolInfo>,
@@ -237,6 +248,26 @@ pub enum Response {
 
     #[serde(other)]
     Unknown,
+}
+
+/// One shared site's tunnel, as reported to the CLI/GUI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareStatusInfo {
+    pub site: String,
+    /// The reserved subdomain label — what keeps the URL stable.
+    pub label: String,
+    pub running: bool,
+    /// The agent's process group, so a `ps` scan can tell dpl's tunnel from one
+    /// started by hand in a terminal.
+    #[serde(default)]
+    pub pgid: Option<u32>,
+    /// The public URL, once the agent has announced one.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Why it isn't connected, when it isn't.
+    #[serde(default)]
+    pub detail: Option<String>,
+    pub log: String,
 }
 
 /// One php-fpm pool — the master dpl supervises, plus whatever php-fpm's own

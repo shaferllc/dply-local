@@ -99,6 +99,11 @@ pub struct Registry {
     appservers: crate::appserver::AppServers,
     /// Supervised Node dev servers, one per opted-in site (see `dpl dev`).
     devservers: crate::devserver::DevServers,
+    /// Supervised Jetty tunnels, one per shared site (see `dpl share`).
+    tunnels: crate::jetty::Tunnels,
+    /// The port the proxy is listening on, which tunnels forward to. Set once
+    /// at startup; defaults to 80 for the case where nothing has said otherwise.
+    http_port: u16,
     routes: BTreeMap<String, RouteInfo>,
     /// Configured TLDs (cached from config for the request hot path).
     tlds: Vec<String>,
@@ -129,6 +134,8 @@ impl Registry {
             fpm: FpmManager::new(),
             appservers: crate::appserver::AppServers::new(),
             devservers: crate::devserver::DevServers::new(),
+            tunnels: crate::jetty::Tunnels::new(),
+            http_port: 80,
             routes: BTreeMap::new(),
             tlds,
             xdebug_installed: BTreeMap::new(),
@@ -165,7 +172,66 @@ impl Registry {
                 }
             }
         }
-        None
+        // Traffic arriving through a Jetty tunnel carries the *public* hostname,
+        // because the edge rewrites Host before forwarding. That matches no
+        // configured TLD, so without this a shared site would answer with the
+        // site-index page — the tunnel would be up and the site unreachable
+        // through it. Checked last so a local `.test` name always wins.
+        self.tunnels.site_for_tunnel_host(host)
+    }
+
+    /// Point tunnels at the port the proxy actually bound. Called once at
+    /// startup, before the first reconcile starts any agents.
+    pub fn set_http_port(&mut self, port: u16) {
+        self.http_port = port;
+    }
+
+    /// One tunnel supervision pass.
+    pub fn supervise_tunnels(&mut self) {
+        self.tunnels.supervise();
+    }
+
+    /// Every supervised tunnel, for `dpl share` and the GUI.
+    pub fn share_statuses(&self) -> Vec<crate::jetty::ShareInfo> {
+        self.tunnels.statuses()
+    }
+
+    /// Reconnect one site's tunnel, clearing any give-up state.
+    pub fn restart_share(&mut self, site: &str) -> Result<String> {
+        if self.tunnels.restart(site) {
+            Ok(format!("Reconnecting `{site}`."))
+        } else {
+            anyhow::bail!("`{site}` isn't shared — `dpl share on {site} <label>` first")
+        }
+    }
+
+    /// Turn sharing on (with a reserved label) or off for one linked site.
+    ///
+    /// Linked-only, because the label lives on the link: a parked site has no
+    /// record to hold one, and a permanent URL is exactly the kind of thing that
+    /// must not silently evaporate when a directory is rescanned.
+    pub fn set_share(&mut self, site: &str, label: Option<&str>) -> Result<String> {
+        let Some(link) = self.config.links.get_mut(site) else {
+            anyhow::bail!("`{site}` isn't a linked site — `dpl link` it first")
+        };
+        match label {
+            Some(l) => {
+                let l = l.trim().to_lowercase();
+                if l.is_empty() {
+                    anyhow::bail!("a subdomain label is required — `dpl share on {site} <label>`")
+                }
+                link.share = Some(l.clone());
+                self.save()?;
+                self.reconcile();
+                Ok(format!("`{site}` is shared at https://{l}.tunnels.usejetty.online"))
+            }
+            None => {
+                link.share = None;
+                self.save()?;
+                self.reconcile();
+                Ok(format!("Sharing off for `{site}`."))
+            }
+        }
     }
 
     fn save(&self) -> Result<()> {
@@ -438,6 +504,18 @@ impl Registry {
         }
         self.devservers.retain(&dev_sites);
 
+        // Start/stop Jetty tunnels. Like dev servers these are side-cars: a
+        // tunnel changes how a site can be *reached*, never how it is served.
+        let mut shared: BTreeSet<String> = BTreeSet::new();
+        for site in resolved.iter() {
+            if let Some(label) = site.share.as_deref().filter(|s| !s.is_empty()) {
+                let host = format!("{}.{}", site.name, site.tld);
+                self.tunnels.ensure(&site.name, label, &host, self.http_port);
+                shared.insert(site.name.clone());
+            }
+        }
+        self.tunnels.retain(&shared);
+
         // Rebuild routes.
         self.routes.clear();
         for (site, bin) in resolved.iter().zip(site_bins) {
@@ -643,6 +721,7 @@ impl Registry {
             name.clone(),
             dpl_core::config::Link {
                 dev: None,
+                share: None,
                 path: path.clone(),
                 php: None,
                 secure: false,
@@ -712,7 +791,7 @@ impl Registry {
             let Ok(path) = canonicalize(path) else { continue };
             self.config.links.insert(
                 name.to_lowercase(),
-                dpl_core::config::Link { path, php: None, secure: false, runtime: None, watch: None, dev: None, xdebug: None, profile: false, preload: None, database: None, db_branch: None, db_port: None },
+                dpl_core::config::Link { path, php: None, secure: false, runtime: None, watch: None, dev: None, share: None, xdebug: None, profile: false, preload: None, database: None, db_branch: None, db_port: None },
             );
             linked_ok += 1;
         }
@@ -1443,6 +1522,11 @@ impl Registry {
             name.clone(),
             dpl_core::config::Link {
                 dev,
+                // Not carried in a spec: a tunnel label is a reservation held by
+                // one team on Jetty's side, so importing a spec must never claim
+                // one — it would either fail or, worse, collide with a name the
+                // importer doesn't own. Turn sharing on explicitly per machine.
+                share: None,
                 path,
                 php: spec.php.clone(),
                 secure: spec.secure,
