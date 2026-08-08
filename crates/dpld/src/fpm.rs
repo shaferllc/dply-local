@@ -72,6 +72,7 @@ impl FpmManager {
                 .arg(&pattern)
                 .status();
         }
+        kill_orphaned_workers();
     }
 
     /// The FastCGI address for a PHP binary at a given Xdebug mode (and preload
@@ -98,6 +99,11 @@ impl FpmManager {
         profile: bool,
         preload: Option<&Path>,
     ) -> Result<u16> {
+        // Pre-per-site GUI wrote zz-dpl-xdebug.ini into Homebrew's system conf.d.
+        // Menu-bar "Debugging" is FPM-only and never affected CLI `php` (Pest TIA,
+        // artisan, …) — scrub the leftover so it can't keep confusing that.
+        let _ = xdebug::cleanup_legacy_system_loader(php_bin);
+
         let key: MasterKey = (php_bin.to_path_buf(), mode.clone(), profile, preload.map(Path::to_path_buf));
         if let Some(m) = self.masters.get_mut(&key) {
             // Reap if it died; otherwise reuse.
@@ -178,12 +184,85 @@ impl FpmManager {
             .cloned()
             .collect();
         for k in drop {
-            if let Some(mut m) = self.masters.remove(&k) {
-                let _ = m.child.start_kill();
+            if let Some(m) = self.masters.remove(&k) {
+                stop_master(m);
                 tracing::info!(php = %k.0.display(), mode = %k.1, "php-fpm master stopped");
             }
         }
     }
+}
+
+/// Retire one master, pool and all.
+///
+/// SIGTERM rather than SIGKILL, because php-fpm terminates its workers from its
+/// own signal handler — a SIGKILLed master never runs it, and the workers live
+/// on as orphans still holding the pool's listening socket. That is not merely a
+/// leak: the port outlives the master, so once we hand it to a fresh master the
+/// stale workers keep accepting on it too, serving requests from a pool nobody
+/// supervises and whose Xdebug mode we already decided against.
+///
+/// The `Child` has to outlive the signal. `kill_on_drop` means dropping it here
+/// would SIGKILL the master before it could reap anything, so ownership moves to
+/// a task that waits for it to leave, with SIGKILL as the backstop if it won't.
+fn stop_master(mut m: Master) {
+    let Some(pid) = m.child.id() else {
+        let _ = m.child.start_kill();
+        return;
+    };
+    signal(pid, "-TERM");
+    tokio::spawn(async move {
+        let exited =
+            tokio::time::timeout(std::time::Duration::from_secs(10), m.child.wait()).await;
+        if exited.is_err() {
+            tracing::warn!(pid, "php-fpm master ignored SIGTERM; killing");
+            let _ = m.child.start_kill();
+            let _ = m.child.wait().await;
+        }
+    });
+}
+
+/// Reap php-fpm *workers* whose master is gone.
+///
+/// The `pkill -f` in [`FpmManager::kill_orphans`] only ever matches masters: a
+/// worker rewrites its argv to `php-fpm: pool www`, so the config path we match
+/// on isn't there to find. Orphaned workers therefore survived every daemon
+/// restart, accumulating indefinitely while holding dead pools' sockets open.
+///
+/// A worker's parent is always its master, so a parent of init means the master
+/// is gone and the worker is garbage by definition. Matching the worker argv
+/// exactly is what keeps this off healthy php-fpm installs, ours or anyone
+/// else's — a master started by launchd also has init for a parent, but reads as
+/// `master process`, never as a pool.
+fn kill_orphaned_workers() {
+    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,comm="]).output()
+    else {
+        return;
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if !line.contains("php-fpm: pool ") {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some("1")) = (fields.next(), fields.next()) else { continue };
+        match pid.parse::<u32>() {
+            Ok(pid) if pid > 1 => {
+                signal(pid, "-TERM");
+                tracing::info!(pid, "reaped orphaned php-fpm worker");
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Send one signal to one pid. Never a pid of 0 or negative — that would mean
+/// "the whole process group" to `kill(1)`, i.e. the daemon itself.
+fn signal(pid: u32, sig: &str) {
+    let _ = std::process::Command::new("/bin/kill")
+        .arg(sig)
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// The environment every php-fpm master carries, independent of the request.
