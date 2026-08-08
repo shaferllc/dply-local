@@ -92,7 +92,24 @@ fn run() -> Result<()> {
             commands::local::setup(home.as_deref(), !no_ports, as_user.as_deref())
         }
         Command::Runtime { site, runtime } => commands::local::set_runtime(home.as_deref(), site, runtime),
-        Command::Octane { site, server } => commands::local::octane_setup(home.as_deref(), &site, &server),
+        Command::Octane { command } => match command {
+            None | Some(cli::OctaneCmd::Status) => {
+                commands::octane::status(home.as_deref(), args.json)
+            }
+            Some(cli::OctaneCmd::Install { site, server }) => {
+                commands::octane::install(home.as_deref(), &site, &server)
+            }
+            Some(cli::OctaneCmd::Reload { site }) => commands::octane::reload(home.as_deref(), site),
+            Some(cli::OctaneCmd::Restart { site }) => {
+                commands::octane::restart(home.as_deref(), site)
+            }
+            Some(cli::OctaneCmd::Watch { site, state }) => {
+                commands::octane::watch(home.as_deref(), site, state)
+            }
+            Some(cli::OctaneCmd::Logs { site, lines, follow }) => {
+                commands::octane::logs(home.as_deref(), site, lines, follow)
+            }
+        },
         Command::Profile { command } => match command {
             None | Some(cli::ProfileCmd::Status) => {
                 commands::profile::status(home.as_deref(), args.json)

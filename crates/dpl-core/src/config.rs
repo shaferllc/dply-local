@@ -193,6 +193,13 @@ pub struct Link {
     /// reverse-proxied instead of served over FastCGI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Whether the daemon watches this site's PHP sources and reloads its Octane
+    /// workers when they change. `None` = the default, which is on: an Octane
+    /// worker holds the application in memory, so a site that doesn't reload is
+    /// a site where the edit you just made hasn't happened. Only meaningful
+    /// alongside an Octane `runtime`. See `dpl octane watch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<bool>,
     /// package.json script the daemon runs as this site's dev server (`"dev"`,
     /// `"watch"`, …). None = off, which is the default and stays the default:
     /// starting a dev server per site is opt-in because a fleet of them is a

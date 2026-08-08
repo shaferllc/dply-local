@@ -453,6 +453,108 @@ fn check_php(c: &mut Checks, home: Option<&str>) {
         c.hint("Usually a Homebrew upgrade moved the shared libraries these extensions link against.");
         c.fix("Repair this version", &format!("dpl php repair {}", v.version));
     }
+
+    // Old GUI wrote zz-dpl-xdebug.ini into Homebrew's system conf.d. Site
+    // debugging is FPM-only now; that leftover neither loads Xdebug for CLI nor
+    // reflects the menu-bar toggle.
+    let legacy: Vec<String> = versions
+        .iter()
+        .filter(|v| dpl_core::xdebug::legacy_system_loader_path(&v.binary).is_some())
+        .map(|v| v.version.clone())
+        .collect();
+    if legacy.is_empty() {
+        c.add(
+            "php.xdebug_system_leftover",
+            cat,
+            "System Xdebug leftover",
+            Status::Pass,
+            "no pre-per-site zz-dpl-xdebug.ini in Homebrew conf.d",
+        );
+    } else {
+        c.add(
+            "php.xdebug_system_leftover",
+            cat,
+            "System Xdebug leftover",
+            Status::Warn,
+            format!(
+                "legacy zz-dpl-xdebug.ini still in system conf.d for PHP {}",
+                legacy.join(", ")
+            ),
+        );
+        c.hint(
+            "Menu-bar debugging loads Xdebug into php-fpm only. The old GUI file in \
+             Homebrew's conf.d does not enable CLI Xdebug for Pest/artisan.",
+        );
+        c.fix("Scrub leftovers", &format!("dpl php repair {}", legacy[0]));
+    }
+
+    // Pest `--tia` / `--coverage` need a coverage driver on the *CLI* binary.
+    // Per-site Xdebug (menu bar) never loads into `php` on PATH by design.
+    let default_bin = cfg
+        .default_php
+        .as_deref()
+        .and_then(dpl_core::php::resolve)
+        .or_else(|| versions.first().map(|v| v.binary.clone()));
+    if let Some(bin) = default_bin {
+        let version = dpl_core::php::version_of(&bin).unwrap_or_else(|| "?".into());
+        let coverage = cli_coverage_driver(&bin);
+        match coverage.as_deref() {
+            Some("pcov") => c.add(
+                "php.cli_coverage",
+                cat,
+                "CLI coverage (Pest TIA)",
+                Status::Pass,
+                format!("pcov loaded on PHP {version}"),
+            ),
+            Some("xdebug") => {
+                c.add(
+                    "php.cli_coverage",
+                    cat,
+                    "CLI coverage (Pest TIA)",
+                    Status::Pass,
+                    format!("Xdebug loaded on PHP {version} CLI"),
+                );
+                let hint = format!(
+                    "pcov is faster for Pest `--tia` / `--coverage`. Prefer \
+                     `dpl php ext-install {version} pcov` and keep Xdebug FPM-only."
+                );
+                c.hint(&hint);
+            }
+            _ => {
+                c.add(
+                    "php.cli_coverage",
+                    cat,
+                    "CLI coverage (Pest TIA)",
+                    Status::Warn,
+                    format!("neither pcov nor Xdebug loaded on PHP {version} CLI"),
+                );
+                c.hint(
+                    "Menu-bar Start Debugging only affects php-fpm for that site. Pest \
+                     `--parallel --tia` needs pcov (preferred) or Xdebug on the CLI binary.",
+                );
+                c.fix("Install pcov for CLI", &format!("dpl php ext-install {version} pcov"));
+            }
+        }
+    }
+}
+
+/// Which coverage driver the CLI `php` binary has loaded, if any.
+fn cli_coverage_driver(php_bin: &Path) -> Option<&'static str> {
+    let out = std::process::Command::new(php_bin)
+        .args([
+            "-d",
+            "display_errors=stderr",
+            "-r",
+            "echo extension_loaded('pcov') ? 'pcov' : (extension_loaded('xdebug') ? 'xdebug' : '');",
+        ])
+        .env_remove("PHP_INI_SCAN_DIR")
+        .output()
+        .ok()?;
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "pcov" => Some("pcov"),
+        "xdebug" => Some("xdebug"),
+        _ => None,
+    }
 }
 
 // ---- Sites ------------------------------------------------------------------

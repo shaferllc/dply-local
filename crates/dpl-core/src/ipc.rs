@@ -65,6 +65,15 @@ pub enum Request {
     /// Set a linked site's runtime: `fpm` | `octane-swoole` |
     /// `octane-roadrunner` | `octane-frankenphp`.
     SetRuntime { site: String, runtime: String },
+    /// Every supervised Octane server's current state.
+    OctaneStatus,
+    /// Gracefully reload one site's Octane workers (`octane:reload`) — new code
+    /// in the workers, same listener on the same port.
+    ReloadOctane { site: String },
+    /// Restart one site's Octane server outright, clearing any give-up state.
+    RestartOctane { site: String },
+    /// Watch a site's PHP sources and reload its Octane workers on change.
+    SetOctaneWatch { site: String, on: bool },
     /// Set the Xdebug mode for one site, or the default when `site` is `None`.
     /// `port`/`ide_key` update the shared IDE settings; any field left `None`
     /// is untouched.
@@ -197,6 +206,10 @@ pub enum Response {
     Versions {
         versions: Vec<VersionInfo>,
     },
+    /// Supervised Octane application servers and their state.
+    AppServers {
+        servers: Vec<AppServerInfo>,
+    },
     /// Supervised Node dev servers and their state.
     DevServers {
         servers: Vec<DevServerInfo>,
@@ -212,6 +225,28 @@ pub enum Response {
 
     #[serde(other)]
     Unknown,
+}
+
+/// One supervised Octane application server, as reported to the CLI/GUI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppServerInfo {
+    pub site: String,
+    /// The runtime it was started for, e.g. `octane-frankenphp`.
+    pub runtime: String,
+    /// The loopback port the proxy forwards this site to.
+    pub port: u16,
+    pub running: bool,
+    /// Whether saving a source file reloads its workers.
+    #[serde(default)]
+    pub watch: bool,
+    /// How many times the daemon has reloaded it this session.
+    #[serde(default)]
+    pub reloads: u32,
+    /// Why it isn't running, when it isn't.
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Absolute path to its log file.
+    pub log: String,
 }
 
 /// One supervised Node dev server, as reported to the CLI/GUI.
@@ -256,6 +291,10 @@ pub struct SiteInfo {
     /// Runtime: `None`/`"fpm"` = php-fpm, else an Octane server.
     #[serde(default)]
     pub runtime: Option<String>,
+    /// Whether saving a source file reloads this site's Octane workers. Only
+    /// meaningful when `runtime` is an Octane server.
+    #[serde(default)]
+    pub watch: bool,
     /// Detected project type, e.g. `"Laravel (^12)"`, `"Symfony"`, `"WordPress"`.
     #[serde(default)]
     pub framework: Option<String>,

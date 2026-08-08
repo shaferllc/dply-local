@@ -164,6 +164,43 @@ async fn dispatch(
         Request::SetRuntime { site, runtime } => {
             mutate(state, |r| r.set_runtime(&site, &runtime)).await
         }
+        Request::OctaneStatus => {
+            let servers = state
+                .registry
+                .lock()
+                .await
+                .octane_statuses()
+                .into_iter()
+                .map(|s| dpl_core::ipc::AppServerInfo {
+                    site: s.site,
+                    runtime: s.runtime,
+                    port: s.port,
+                    running: s.running,
+                    watch: s.watch,
+                    reloads: s.reloads,
+                    detail: s.detail,
+                    log: s.log,
+                })
+                .collect();
+            Response::AppServers { servers }
+        }
+        // Reload and restart act on the running process, not the config, so
+        // they don't go through `mutate` — there is nothing to save.
+        Request::ReloadOctane { site } => {
+            match state.registry.lock().await.reload_octane(&site) {
+                Ok(text) => Response::Message { text },
+                Err(e) => Response::Error { message: format!("{e:#}") },
+            }
+        }
+        Request::RestartOctane { site } => {
+            match state.registry.lock().await.restart_octane(&site) {
+                Ok(text) => Response::Message { text },
+                Err(e) => Response::Error { message: format!("{e:#}") },
+            }
+        }
+        Request::SetOctaneWatch { site, on } => {
+            mutate(state, |r| r.set_octane_watch(&site, on)).await
+        }
         Request::SetTags { site, tags } => {
             mutate(state, |r| r.set_tags(&site, &tags)).await
         }

@@ -9,6 +9,7 @@ pub mod keel;
 pub mod local;
 pub mod mail;
 pub mod node;
+pub mod octane;
 pub mod parity;
 pub mod preload;
 pub mod profile;

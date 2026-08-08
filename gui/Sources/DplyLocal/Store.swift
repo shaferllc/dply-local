@@ -304,6 +304,26 @@ struct WorkerGroup: Identifiable { let kind: String; let items: [WorkerItem]; va
 
 /// A dev server the daemon supervises — the controllable half of the Workers
 /// card, as opposed to the processes we merely observe in `ps`.
+/// One supervised Laravel Octane server, as `dpl octane --json` reports it.
+struct OctaneServer: Identifiable, Equatable {
+    let site: String
+    /// e.g. `octane-frankenphp`.
+    let runtime: String
+    /// The loopback port the proxy forwards the site to.
+    let port: Int?
+    let running: Bool
+    /// Whether saving a file reloads its workers.
+    let watch: Bool
+    let reloads: Int
+    /// Why it isn't running, when it isn't.
+    let detail: String?
+    var id: String { site }
+    /// Just the server name: `frankenphp`, `swoole`, `roadrunner`.
+    var server: String {
+        runtime.hasPrefix("octane-") ? String(runtime.dropFirst("octane-".count)) : runtime
+    }
+}
+
 struct DevServer: Identifiable, Equatable {
     let site: String
     let script: String
@@ -1005,7 +1025,30 @@ final class Store: ObservableObject {
     /// artisan in Terminal (it modifies the project, may prompt).
     func runOctaneSetupInTerminal(site: String, server: String) {
         guard let dpl = try? cli.resolveBinary() else { return }
-        runInTerminal("\(dpl) octane \(site) --server \(server)")
+        runInTerminal("\(dpl) octane install \(site) --server \(server)")
+    }
+
+    /// Reload a site's Octane workers so they pick up the code on disk. The
+    /// listener stays up, so the site keeps answering throughout.
+    func reloadOctane(site: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["octane", "reload", site]) }
+        await loadLocal()
+    }
+
+    /// Restart a site's Octane server outright — the hammer for when reloading
+    /// the workers isn't enough.
+    func restartOctane(site: String) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["octane", "restart", site]) }
+        await loadLocal()
+    }
+
+    /// Turn reload-on-save on or off for a site's Octane server.
+    func setOctaneWatch(site: String, on: Bool) async {
+        let cli = self.cli
+        _ = await background { try cli.runRaw(["octane", "watch", site, on ? "on" : "off"]) }
+        await loadLocal()
     }
 
     func unlinkLocal(name: String) async {
@@ -2108,6 +2151,26 @@ final class Store: ObservableObject {
                 running: o["running"]?.boolValue ?? false,
                 pgid: o["pgid"]?.intValue,
                 port: o["port"]?.intValue,
+                detail: o["detail"]?.stringValue
+            )
+        }
+    }
+
+    /// Every supervised Octane server and what it's doing — the other half of
+    /// the workers dpl owns, and the only ones where "reload" means something.
+    func octaneServers() async -> [OctaneServer] {
+        let cli = self.cli
+        let row = await backgroundQuiet { try cli.object(["octane"]) }
+        guard let list = row?.dig("servers")?.arrayValue else { return [] }
+        return list.compactMap { entry in
+            guard let o = entry.objectValue, let site = o["site"]?.stringValue else { return nil }
+            return OctaneServer(
+                site: site,
+                runtime: o["runtime"]?.stringValue ?? "octane",
+                port: o["port"]?.intValue,
+                running: o["running"]?.boolValue ?? false,
+                watch: o["watch"]?.boolValue ?? false,
+                reloads: o["reloads"]?.intValue ?? 0,
                 detail: o["detail"]?.stringValue
             )
         }

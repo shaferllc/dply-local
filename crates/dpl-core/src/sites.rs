@@ -366,6 +366,9 @@ pub struct ResolvedSite {
     /// Application-server runtime (`None`/`"fpm"` = php-fpm; else an Octane
     /// server the daemon supervises + proxies).
     pub runtime: Option<String>,
+    /// Whether the daemon reloads this site's Octane workers when its sources
+    /// change. Defaults to on; meaningless without an Octane `runtime`.
+    pub watch: bool,
     /// Effective Xdebug mode: the site's own setting, else the config default.
     /// An unparsable stored value degrades to `off` rather than failing the
     /// whole reconcile over one bad site.
@@ -457,6 +460,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
             source: SiteSource::Linked,
             tld: tld.clone(),
             runtime: link.runtime.clone(),
+            watch: link.watch.unwrap_or(true),
             dev: link.dev.clone(),
             tags,
             xdebug: mode_of(link.xdebug.as_ref()),
@@ -489,6 +493,7 @@ pub fn resolve(config: &LocalConfig) -> Vec<ResolvedSite> {
                 source: SiteSource::Parked,
                 tld: tld.clone(),
                 runtime: None,
+                watch: true,
                 dev: None,
                 tags,
                 xdebug: mode_of(None),
@@ -530,6 +535,7 @@ pub fn resolve_one(config: &LocalConfig, name: &str) -> Option<ResolvedSite> {
             source: SiteSource::Linked,
             tld,
             runtime: link.runtime.clone(),
+            watch: link.watch.unwrap_or(true),
             dev: link.dev.clone(),
             tags,
             xdebug: mode_of(link.xdebug.as_ref()),
@@ -550,6 +556,7 @@ pub fn resolve_one(config: &LocalConfig, name: &str) -> Option<ResolvedSite> {
                 source: SiteSource::Parked,
                 tld,
                 runtime: None,
+                watch: true,
                 dev: None,
                 tags,
                 xdebug: mode_of(None),

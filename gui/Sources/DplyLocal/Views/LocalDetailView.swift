@@ -830,12 +830,35 @@ struct LocalDetailView: View {
         .fixedSize()
     }
 
+    /// Whether this site runs on Octane rather than php-fpm.
+    private var isOctane: Bool {
+        let runtime = site.cell(["runtime"])
+        return !runtime.isEmpty && runtime != "fpm"
+    }
+
+    /// Whether saving a file reloads this site's Octane workers.
+    private var isWatching: Bool { site.dig("watch") == .bool(true) }
+
     /// The application-server runtime picker: php-fpm (default) or Laravel
     /// Octane on Swoole / RoadRunner / FrankenPHP.
+    ///
+    /// An Octane site gets the two actions php-fpm never needs: reload, because
+    /// the workers are holding your application in memory, and the watch toggle
+    /// that does it for you on every save.
     private var runtimeMenu: some View {
         let current = site.cell(["runtime"])
         let label = current.isEmpty || current == "fpm" ? "php-fpm" : current.replacingOccurrences(of: "octane-", with: "Octane ")
         return Menu {
+            if isOctane {
+                Section("This Octane server") {
+                    Button("Reload workers") { Task { await store.reloadOctane(site: name) } }
+                    Button("Restart server") { Task { await store.restartOctane(site: name) } }
+                    Toggle("Reload when I save", isOn: Binding(
+                        get: { isWatching },
+                        set: { on in Task { await store.setOctaneWatch(site: name, on: on) } }
+                    ))
+                }
+            }
             Button("php-fpm (default)") { Task { await store.setRuntime(site: name, runtime: "fpm") } }
             Section("Laravel Octane (installs into project)") {
                 Button("Swoole…") { store.runOctaneSetupInTerminal(site: name, server: "swoole") }
@@ -847,7 +870,9 @@ struct LocalDetailView: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Run this site on php-fpm or a Laravel Octane server")
+        .help(isOctane
+            ? "Reload this site's Octane workers, or move it back to php-fpm"
+            : "Run this site on php-fpm or a Laravel Octane server")
     }
 
     private var addTldSheet: some View {

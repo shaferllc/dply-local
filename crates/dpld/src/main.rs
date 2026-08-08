@@ -70,6 +70,9 @@ fn main() -> anyhow::Result<()> {
         // Reap php-fpm masters leaked by a previous (SIGKILLed) daemon before
         // we spawn fresh ones, so they don't accumulate across restarts.
         fpm::FpmManager::kill_orphans();
+        // Same for Octane servers: a SIGKILLed daemon never stopped them, and
+        // Octane won't start a second server for a project that still has one.
+        appserver::AppServers::kill_orphans();
 
         // Build the site registry and start backends for the saved config.
         let mut registry = registry::Registry::load().context("loading registry")?;
@@ -146,6 +149,13 @@ fn main() -> anyhow::Result<()> {
             tokio::spawn(async move { devserver::watch(state).await })
         };
 
+        // Keep Octane servers alive, and reload their workers when the code
+        // they're holding in memory changes on disk.
+        let appserver_task = {
+            let state = state.clone();
+            tokio::spawn(async move { appserver::watch(state).await })
+        };
+
         let result = server::run(state).await;
 
         proxy_task.abort();
@@ -155,6 +165,7 @@ fn main() -> anyhow::Result<()> {
         dumps_task.abort();
         branchdb_task.abort();
         devserver_task.abort();
+        appserver_task.abort();
         result
     })
 }

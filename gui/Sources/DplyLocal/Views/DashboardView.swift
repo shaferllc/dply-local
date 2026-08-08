@@ -8,6 +8,7 @@ struct DashboardView: View {
     @State private var top: [(name: String, mb: Int, cpu: Double)] = []
     @State private var workers: [WorkerGroup] = []
     @State private var devServers: [DevServer] = []
+    @State private var octaneServers: [OctaneServer] = []
     /// Sites whose dev server is mid-action, so the row can disable itself.
     @State private var devBusy: Set<String> = []
     @State private var devLogs: NodeRunRequest?
@@ -122,15 +123,24 @@ struct DashboardView: View {
 
     private var workersCard: some View {
         let observed = workers.reduce(0) { $0 + $1.items.count }
-        let total = observed + devServers.filter(\.running).count
+        let total = observed + devServers.filter(\.running).count + octaneServers.filter(\.running).count
         return card(title: "Workers", badge: total > 0 ? "\(total) running" : "none",
                     badgeColor: total > 0 ? .green : .secondary) {
             VStack(alignment: .leading, spacing: 8) {
-                if workers.isEmpty && devServers.isEmpty {
-                    Text("No dev servers, Horizon, queue, Reverb or Vite workers detected.")
+                if workers.isEmpty && devServers.isEmpty && octaneServers.isEmpty {
+                    Text("No Octane servers, dev servers, Horizon, queue, Reverb or Vite workers detected.")
                         .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
                 }
                 // Supervised first: these are the ones you can act on.
+                if !octaneServers.isEmpty {
+                    HStack {
+                        Text("OCTANE").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(octaneServers.filter(\.running).count)/\(octaneServers.count)")
+                            .font(.caption2.monospacedDigit()).foregroundStyle(.green)
+                    }
+                    ForEach(octaneServers) { server in octaneRow(server) }
+                }
                 if !devServers.isEmpty {
                     HStack {
                         Text("DEV SERVERS").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
@@ -161,7 +171,7 @@ struct DashboardView: View {
                     }
                 }
                 Spacer(minLength: 2)
-                Text(workers.isEmpty && devServers.isEmpty ? "" : hint)
+                Text(workers.isEmpty && devServers.isEmpty && octaneServers.isEmpty ? "" : hint)
                     .font(.caption2).foregroundStyle(.secondary).padding(.top, 2)
             }
         }
@@ -170,9 +180,51 @@ struct DashboardView: View {
     /// The observed processes can't be controlled from here — say so once,
     /// rather than leaving the reader to wonder why only some rows have buttons.
     private var hint: String {
-        if devServers.isEmpty { return "Started outside dpl — restart them where you started them." }
+        let supervised = !devServers.isEmpty || !octaneServers.isEmpty
+        if !supervised { return "Started outside dpl — restart them where you started them." }
         if workers.isEmpty { return "Supervised by dpl: these restart themselves if they die." }
-        return "Dev servers are supervised; the rest were started outside dpl."
+        return "The supervised rows are dpl's; the rest were started outside it."
+    }
+
+    /// One supervised Octane server: state, port, and the two actions php-fpm
+    /// never needs — reload the workers holding the app in memory, and follow
+    /// what the server is saying while they come back.
+    private func octaneRow(_ server: OctaneServer) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(server.running ? Color.green : Color.orange).frame(width: 6, height: 6)
+            Text(server.site).font(.callout).foregroundStyle(Theme.violet).lineLimit(1)
+            Text(server.server).font(.caption2).foregroundStyle(.secondary)
+            if server.running, server.watch {
+                Image(systemName: "eye")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .help("Reloads when you save")
+            }
+            if !server.running, let detail = server.detail {
+                Text(detail).font(.caption2).foregroundStyle(.orange).lineLimit(1)
+            }
+            Spacer()
+            if devBusy.contains(server.site) {
+                ProgressView().controlSize(.small)
+            } else {
+                Button {
+                    Task { await act(server.site) { await store.reloadOctane(site: server.site) } }
+                } label: { Image(systemName: "arrow.triangle.2.circlepath") }
+                    .buttonStyle(.borderless).help("Reload the workers — picks up your latest code")
+                Button {
+                    Task { await act(server.site) { await store.restartOctane(site: server.site) } }
+                } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Restart the server")
+                Button {
+                    devLogs = NodeRunRequest(
+                        title: "Octane logs",
+                        scope: server.site,
+                        args: ["octane", "logs", server.site, "--follow"]
+                    )
+                } label: { Image(systemName: "doc.plaintext") }
+                    .buttonStyle(.borderless).help("Follow the log")
+            }
+        }
+        .padding(.leading, 4)
     }
 
     /// One supervised dev server: state, where it's listening, stop/restart.
@@ -299,6 +351,7 @@ struct DashboardView: View {
         health = await store.doctor()
         top = await store.topProcesses()
         devServers = await store.devServers()
+        octaneServers = await store.octaneServers()
         // Hand the supervised process groups to the ps scan so a dev server dpld
         // owns isn't also listed as an untouchable observed process.
         let supervised = Set(devServers.compactMap(\.pgid))

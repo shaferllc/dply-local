@@ -256,6 +256,7 @@ impl Registry {
                     secure: s.secure,
                     serving,
                     runtime: s.runtime,
+                    watch: s.watch,
                     framework: project.framework,
                     requires_php: project.requires_php,
                     kind: Some(project.kind.as_str().to_string()),
@@ -294,6 +295,7 @@ impl Registry {
                 secure: false,
                 serving: true,
                 runtime: None,
+                watch: false,
                 framework: None,
                 requires_php: None,
                 // A reverse proxy runs no PHP of ours, so Xdebug/SPX are meaningless.
@@ -410,7 +412,7 @@ impl Registry {
         for (site, bin) in resolved.iter().zip(&site_bins) {
             let runtime = site.runtime.as_deref().unwrap_or("fpm");
             if runtime != "fpm" && !runtime.is_empty() {
-                if let Some(port) = self.appservers.ensure(&site.name, runtime, &site.path, bin) {
+                if let Some(port) = self.appservers.ensure(&site.name, runtime, &site.path, bin, site.watch) {
                     octane_sites.insert(site.name.clone());
                     upstreams.insert(site.name.clone(), port);
                 }
@@ -491,7 +493,7 @@ impl Registry {
                 // Octane runtime for this site, if any.
                 let runtime = site.runtime.as_deref().unwrap_or("fpm");
                 let upstream = if runtime != "fpm" && !runtime.is_empty() {
-                    self.appservers.ensure(&site.name, runtime, &site.path, &bin)
+                    self.appservers.ensure(&site.name, runtime, &site.path, &bin, site.watch)
                 } else {
                     None
                 };
@@ -638,6 +640,7 @@ impl Registry {
                 php: None,
                 secure: false,
                 runtime: None,
+                watch: None,
                 xdebug: None,
                 profile: false,
                 preload: None,
@@ -702,7 +705,7 @@ impl Registry {
             let Ok(path) = canonicalize(path) else { continue };
             self.config.links.insert(
                 name.to_lowercase(),
-                dpl_core::config::Link { path, php: None, secure: false, runtime: None, dev: None, xdebug: None, profile: false, preload: None, database: None, db_branch: None, db_port: None },
+                dpl_core::config::Link { path, php: None, secure: false, runtime: None, watch: None, dev: None, xdebug: None, profile: false, preload: None, database: None, db_branch: None, db_port: None },
             );
             linked_ok += 1;
         }
@@ -1104,6 +1107,71 @@ impl Registry {
         self.devservers.supervise();
     }
 
+    /// Every supervised Octane server's current state.
+    pub fn octane_statuses(&self) -> Vec<crate::appserver::AppServerInfo> {
+        self.appservers.statuses()
+    }
+
+    /// The Octane sites to fingerprint this tick, with the project root to scan.
+    /// Handed out so the caller can walk the tree without holding this registry.
+    pub fn appserver_watch_targets(&self) -> Vec<(String, std::path::PathBuf)> {
+        self.appservers.watch_targets()
+    }
+
+    /// One Octane supervision pass, given this tick's source fingerprints.
+    /// Driven by the daemon's watch loop: neither a worker dying nor a file
+    /// being saved is a mutation, so nothing else would notice either.
+    pub fn supervise_appservers(&mut self, scans: &[(String, u64)]) {
+        self.appservers.supervise(scans);
+    }
+
+    /// Gracefully reload one site's Octane workers — `dpl octane reload`.
+    pub fn reload_octane(&mut self, site: &str) -> Result<String> {
+        let site = site.to_lowercase();
+        if !self.appservers.reload(&site) {
+            anyhow::bail!(
+                "`{site}` isn't running on Octane. Switch it with `dpl runtime {site} octane-frankenphp`."
+            );
+        }
+        Ok(format!("`{site}` Octane workers reloading — new code, same listener."))
+    }
+
+    /// Bounce one site's Octane server outright — `dpl octane restart`.
+    pub fn restart_octane(&mut self, site: &str) -> Result<String> {
+        let site = site.to_lowercase();
+        if !self.appservers.restart(&site) {
+            anyhow::bail!(
+                "`{site}` isn't running on Octane. Switch it with `dpl runtime {site} octane-frankenphp`."
+            );
+        }
+        Ok(format!("`{site}` Octane server stopping — it comes back in a second or two."))
+    }
+
+    /// Turn source watching on or off for a site — `dpl octane watch`.
+    pub fn set_octane_watch(&mut self, site: &str, on: bool) -> Result<String> {
+        let site = site.to_lowercase();
+        let link = self.config.links.get_mut(&site).with_context(|| {
+            format!("no linked site named `{site}` (watching applies to linked sites)")
+        })?;
+        // `None` is the default (on), so only the off case needs storing.
+        link.watch = if on { None } else { Some(false) };
+        let runtime = link.runtime.clone();
+        self.save()?;
+        self.reconcile_site(&site);
+
+        let note = match runtime.as_deref() {
+            None | Some("fpm") | Some("") => {
+                " (it takes effect when the site moves to an Octane runtime — php-fpm reads your code fresh on every request)"
+            }
+            _ => "",
+        };
+        Ok(if on {
+            format!("`{site}` reloads its Octane workers when you save{note}.")
+        } else {
+            format!("`{site}` no longer reloads on save — use `dpl octane reload {site}`{note}.")
+        })
+    }
+
     /// Whether any Octane server is currently supervised.
     fn appservers_active(&self) -> bool {
         self.routes.values().any(|r| r.upstream.is_some())
@@ -1305,6 +1373,7 @@ impl Registry {
                 php: spec.php.clone(),
                 secure: spec.secure,
                 runtime,
+                watch: spec.watch,
                 xdebug,
                 profile: spec.profile,
                 preload,
@@ -1335,6 +1404,7 @@ impl Registry {
             php: link.php.clone(),
             secure: link.secure,
             runtime: link.runtime.clone(),
+            watch: link.watch,
             xdebug: link.xdebug.clone(),
             profile: link.profile,
             preload: link.preload.as_ref().map(|p| p.to_string_lossy().into_owned()),

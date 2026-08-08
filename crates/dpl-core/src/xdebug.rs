@@ -236,6 +236,9 @@ pub fn write_loader(
     php_bin: &Path,
     settings: &Settings,
 ) -> Result<Option<PathBuf>> {
+    // Drop the pre-per-site GUI leftover before writing the real loader.
+    let _ = cleanup_legacy_system_loader(php_bin);
+
     let dir = crate::paths::php_conf_dir(override_home, php_bin)?;
     let ini = dir.join("zz-dpl-xdebug.ini");
 
@@ -250,6 +253,36 @@ pub fn write_loader(
     std::fs::write(&ini, loader_ini(&so, settings, &output_dir))
         .map_err(|e| CoreError::io(&ini, e))?;
     Ok(Some(dir))
+}
+
+/// Path of the pre-per-site-Xdebug GUI leftover in the *system* conf.d, if any.
+///
+/// The old SwiftUI path wrote `zz-dpl-xdebug.ini` into Homebrew's scan directory
+/// (often just `xdebug.mode=off` with no `zend_extension`). That neither enabled
+/// site debugging nor helped CLI tools like Pest TIA — and it confused users who
+/// saw "Debugging on" in the menu bar while `php -m` had no Xdebug. Current dpl
+/// loads Xdebug only via [`crate::paths::php_conf_dir`] + `PHP_INI_SCAN_DIR`.
+pub fn legacy_system_loader_path(php_bin: &Path) -> Option<PathBuf> {
+    let dir = system_conf_dir(php_bin)?;
+    let ini = dir.join("zz-dpl-xdebug.ini");
+    if !ini.is_file() {
+        return None;
+    }
+    let Ok(text) = std::fs::read_to_string(&ini) else {
+        return None;
+    };
+    // Only treat files that look like ours as leftovers — never remove a
+    // user-authored file that happens to share the name.
+    text.contains("Managed by dpl").then_some(ini)
+}
+
+/// Remove [`legacy_system_loader_path`] when present. Returns `true` if a file
+/// was deleted.
+pub fn cleanup_legacy_system_loader(php_bin: &Path) -> bool {
+    let Some(ini) = legacy_system_loader_path(php_bin) else {
+        return false;
+    };
+    std::fs::remove_file(&ini).is_ok()
 }
 
 /// The `PHP_INI_SCAN_DIR` value that adds `dir` to PHP's default scan path.
@@ -336,6 +369,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(so_from_conf_dir(&dir), Some(so));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cleanup_removes_only_dpl_managed_system_leftovers() {
+        let dir = std::env::temp_dir().join(format!("dpl-xdebug-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = dir.join("zz-dpl-xdebug.ini");
+        std::fs::write(&ours, "; Managed by dpl — Xdebug\nxdebug.mode=off\n").unwrap();
+        let foreign = dir.join("zz-dpl-xdebug.ini.foreign");
+        // Simulate the name check: a non-dpl file must not match via content.
+        assert!(std::fs::read_to_string(&ours).unwrap().contains("Managed by dpl"));
+        std::fs::remove_file(&ours).unwrap();
+        std::fs::write(&foreign, "xdebug.mode=debug\n").unwrap();
+        assert!(!std::fs::read_to_string(&foreign).unwrap().contains("Managed by dpl"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

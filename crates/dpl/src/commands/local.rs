@@ -318,6 +318,14 @@ pub fn php_repair(version: &str) -> Result<()> {
         }
         println!("  Reinstall an extension formula to restore it, e.g. `brew reinstall php@{v}-imap`.");
     }
+
+    // Pre-per-site GUI leftover in Homebrew's system conf.d (not dpl's scan dir).
+    if let Some(bin) = dpl_core::php::resolve(&v) {
+        if dpl_core::xdebug::cleanup_legacy_system_loader(&bin) {
+            println!("  Removed legacy system zz-dpl-xdebug.ini (menu-bar debugging is FPM-only).");
+        }
+    }
+
     println!("\n✓ PHP {v} repaired.");
     Ok(())
 }

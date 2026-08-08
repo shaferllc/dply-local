@@ -191,13 +191,12 @@ pub enum Command {
         /// fpm | octane-swoole | octane-roadrunner | octane-frankenphp.
         runtime: String,
     },
-    /// Install Laravel Octane in a site and switch it to that server.
+    /// Laravel Octane sites: install one, see what's running, reload the workers
+    /// holding your application in memory, and control the file watching that
+    /// reloads them for you. `dpl octane` with no subcommand lists them.
     Octane {
-        /// Linked site name (a Laravel app).
-        site: String,
-        /// Server: swoole | roadrunner | frankenphp.
-        #[arg(long, default_value = "frankenphp")]
-        server: String,
+        #[command(subcommand)]
+        command: Option<OctaneCmd>,
     },
     /// SPX flame-graph profiler per site. `dpl profile` with no subcommand shows
     /// each site's status; `on`/`off` toggle it; `open` launches the flame graphs.
@@ -613,6 +612,55 @@ pub enum TagsCmd {
     /// Remove a tag from every site that carries it.
     Delete {
         tag: String,
+    },
+}
+
+/// Laravel Octane operations. An Octane server boots your application once and
+/// keeps it in memory across requests — which is the speed, and also the catch:
+/// the code it's holding is the code as it was when the worker started. Watching
+/// (on by default) reloads the workers when you save; `reload` does it by hand.
+#[derive(Subcommand)]
+pub enum OctaneCmd {
+    /// Show every Octane site: server, port, watching, reloads (the default).
+    Status,
+    /// Install Laravel Octane into a site and switch it to that server.
+    Install {
+        /// Linked site name (a Laravel app).
+        site: String,
+        /// Server: swoole | roadrunner | frankenphp.
+        #[arg(long, default_value = "frankenphp")]
+        server: String,
+    },
+    /// Reload a site's workers so they pick up your latest code — graceful, and
+    /// the site keeps answering on the same port throughout.
+    Reload {
+        /// Linked site name.
+        site: String,
+    },
+    /// Restart a site's Octane server outright, clearing any give-up state. The
+    /// bigger hammer for when a reload isn't enough (a changed extension, a
+    /// wedged worker pool).
+    Restart {
+        /// Linked site name.
+        site: String,
+    },
+    /// Turn reload-on-save on or off for a site, or show it with neither.
+    Watch {
+        /// Linked site name.
+        site: String,
+        /// `on` or `off`. Omit to show the current setting.
+        state: Option<String>,
+    },
+    /// Print what a site's Octane server has logged.
+    Logs {
+        /// Linked site name.
+        site: String,
+        /// How many trailing lines to show.
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+        /// Keep printing as the server writes (Ctrl-C to stop).
+        #[arg(long, short)]
+        follow: bool,
     },
 }
 

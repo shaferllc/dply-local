@@ -36,6 +36,11 @@ pub struct SiteSpec {
     /// `"octane-roadrunner"`, `"octane-frankenphp"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Watch this project's PHP sources and reload the Octane workers on change.
+    /// Absent = the default, which is on; only a project that deliberately turns
+    /// it off needs the key. Ignored without an Octane `runtime`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<bool>,
     /// Xdebug mode for the site, e.g. `"debug"`. Absent = off/default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xdebug: Option<String>,
@@ -88,6 +93,7 @@ mod tests {
             php: Some("8.3".into()),
             secure: true,
             runtime: Some("octane-swoole".into()),
+            watch: Some(false),
             xdebug: Some("debug".into()),
             profile: false,
             preload: Some("preload.php".into()),
@@ -110,7 +116,7 @@ mod tests {
     fn defaults_are_omitted_from_output() {
         let text = SiteSpec { php: Some("8.4".into()), ..Default::default() }.to_toml();
         assert!(text.contains("php = \"8.4\""));
-        for absent in ["secure", "profile", "runtime", "database", "services", "name", "dev"] {
+        for absent in ["secure", "profile", "runtime", "watch", "database", "services", "name", "dev"] {
             assert!(!text.contains(absent), "default field `{absent}` leaked into output:\n{text}");
         }
     }
