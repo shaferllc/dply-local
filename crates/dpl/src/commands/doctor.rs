@@ -721,12 +721,48 @@ fn check_tooling(c: &mut Checks) {
         "Needed by `dpl share quick` for a one-off public URL. Not needed for `dpl share`, which uses Jetty.",
         "brew install cloudflared",
     );
+    check_cpx(c, cat);
     check_jetty(c, cat);
 
     // Valet isn't a dependency — it's a conflict worth naming when present.
     if let Some(p) = which("valet") {
         c.add("tool.valet", cat, "Laravel Valet", Status::Info, format!("installed at {p}"));
         c.hint("Valet and dpl both want ports 80/443. `dpl takeover` hands them to dpl; `dpl untakeover` gives them back.");
+    }
+}
+
+/// Where cpx is, if it's installed. Searched by path as well as `PATH`, because
+/// it installs Composer-globally and the daemon can't see that.
+fn cpx_path() -> Option<String> {
+    if let Some(p) = which("cpx") {
+        return Some(p);
+    }
+    let home = std::env::var("HOME").ok()?;
+    [
+        format!("{home}/.composer/vendor/bin/cpx"),
+        format!("{home}/.config/composer/vendor/bin/cpx"),
+    ]
+    .into_iter()
+    .find(|p| Path::new(p).is_file())
+}
+
+/// cpx — `npx` for Composer packages, used to run PHP tooling without
+/// installing it globally.
+///
+/// Worth its own row because it turns a whole class of problem into a
+/// non-problem: with cpx present, a missing PHP tool needs no install step, and
+/// there is no global copy to drift out of date behind your back.
+fn check_cpx(c: &mut Checks, cat: &str) {
+    match cpx_path() {
+        Some(p) => c.add("tool.cpx", cat, "cpx", Status::Pass, p),
+        None => {
+            c.add("tool.cpx", cat, "cpx", Status::Info, "not installed");
+            c.hint(
+                "cpx runs Composer packages on demand (cpx.dev), so PHP tooling needs no global \
+                 install and can't go stale. dpl uses it to run the Jetty CLI when one isn't installed.",
+            );
+            c.fix("Install it", "composer global require cpx/cpx");
+        }
     }
 }
 
@@ -756,9 +792,17 @@ fn check_jetty(c: &mut Checks, cat: &str) {
     .collect();
 
     if candidates.is_empty() && which("jetty").is_none() {
-        c.add("tool.jetty", cat, "Jetty CLI", Status::Warn, "not installed");
-        c.hint("Needed by `dpl share` to give a site a permanent public URL.");
-        c.fix("Install it", "composer global require jetty/client");
+        // cpx runs a Composer package on demand, so with it present there is
+        // nothing to install — and nothing to drift out of date later, which is
+        // the failure mode a global install keeps producing here.
+        if cpx_path().is_some() {
+            c.add("tool.jetty", cat, "Jetty CLI", Status::Pass, "not installed — will run via cpx");
+            c.hint("cpx fetches and caches `jetty/client` on demand, so there is no global copy to go stale.");
+        } else {
+            c.add("tool.jetty", cat, "Jetty CLI", Status::Warn, "not installed");
+            c.hint("Needed by `dpl share` to give a site a permanent public URL.");
+            c.fix("Install it", "composer global require jetty/client");
+        }
         return;
     }
 

@@ -316,11 +316,12 @@ impl Tunnel {
             "--no-health-check".to_string(),
         ];
 
-        let Some(bin) = jetty_bin() else {
+        let Some((bin, prefix)) = jetty_launcher() else {
             self.failures += 1;
             self.detail = Some(
-                "can't find the `jetty` CLI. The daemon runs with launchd's minimal PATH, \
-                 so a Composer-global install isn't visible to it — set JETTY_BIN, then \
+                "can't find the `jetty` CLI, or `cpx` to run it with. The daemon runs under \
+                 launchd's minimal PATH, so a Composer-global install isn't visible to it — \
+                 install cpx (`composer global require cpx/cpx`) or set JETTY_BIN, then \
                  `dpl share restart`."
                     .to_string(),
             );
@@ -330,7 +331,8 @@ impl Tunnel {
         };
 
         let mut cmd = Command::new(&bin);
-        cmd.args(&args)
+        cmd.args(&prefix)
+            .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::from(open_log(&self.log)))
             .stderr(std::process::Stdio::from(open_log(&self.log)))
@@ -412,6 +414,40 @@ fn jetty_bin() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/opt/homebrew/bin/jetty"));
     candidates.push(PathBuf::from("/usr/local/bin/jetty"));
     candidates.into_iter().find(|p| p.is_file())
+}
+
+/// The Composer package behind the `jetty` CLI, for running it through cpx.
+const JETTY_PACKAGE: &str = "jetty/client";
+
+/// How to invoke the Jetty CLI: a program plus any arguments that must precede
+/// the ones we want to pass.
+///
+/// Two shapes, in preference order. An installed binary is used directly. If
+/// there is none, the tool is run through [cpx](https://cpx.dev) — `npx` for
+/// Composer packages — which fetches and caches `jetty/client` on demand.
+///
+/// The cpx path is worth having for more than convenience. Every Jetty failure
+/// this integration has hit was an *installation* problem rather than a tunnel
+/// problem: a Composer-global install invisible to the daemon's launchd PATH,
+/// and two installs drifting to different versions where the older one crashed
+/// resuming a tunnel. cpx keeps one cached copy it updates itself, so neither
+/// can happen.
+fn jetty_launcher() -> Option<(PathBuf, Vec<String>)> {
+    if let Some(bin) = jetty_bin() {
+        return Some((bin, Vec::new()));
+    }
+    // Same search as the CLI itself: cpx is a Composer-global install, so the
+    // daemon's minimal PATH usually can't see it either.
+    let home = dpl_core::paths::home(None).ok();
+    let cpx = dpl_core::tools::which("cpx").or_else(|| {
+        home.as_ref().and_then(|h| {
+            [h.join(".composer/vendor/bin/cpx"), h.join(".config/composer/vendor/bin/cpx")]
+                .into_iter()
+                .find(|p| p.is_file())
+        })
+    })?;
+    // `-n` so a fetch never stops on a prompt no one is there to answer.
+    Some((cpx, vec![JETTY_PACKAGE.to_string(), "-n".to_string()]))
 }
 
 /// The URL a reserved label resolves to. Used before the agent has printed one,
