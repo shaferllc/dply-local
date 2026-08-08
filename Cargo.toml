@@ -10,12 +10,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.82"
 authors = ["Tom Shafer"]
-license = "MIT"
-repository = "https://github.com/tshafer/dply-local"
+# Matches LICENSE, which is proprietary. This said `MIT` until 0.5.0 — an
+# affirmative grant of the rights LICENSE withholds, left behind when the
+# relicense updated every other file. `LicenseRef-` is SPDX's form for a
+# licence that isn't in its registry; the crates inherit this key, so it stays
+# `license` rather than `license-file`.
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/shaferllc/dply-local"
 
 [workspace.dependencies]
 # Shared crates
