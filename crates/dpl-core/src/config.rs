@@ -106,6 +106,30 @@ pub struct LocalConfig {
     /// link to hang metadata on. Tags describe the site, not how it was
     /// registered. Normalised on the way in (see [`normalize_tags`]).
     pub tags: BTreeMap<String, Vec<String>>,
+    /// Ceiling on worker processes per php-fpm pool. `None` means
+    /// [`DEFAULT_FPM_MAX_CHILDREN`].
+    ///
+    /// Worth tuning because it is a *memory* ceiling, not a concurrency one, and
+    /// it applies per pool rather than per machine: dpl runs one master per
+    /// (PHP version, Xdebug mode, profiler, preload), so several pools can be
+    /// live at once and each may grow to this many workers. At the ~100 MB a
+    /// Laravel worker typically resides at, the default is already ~4 GB per
+    /// pool if anything ever saturates it.
+    pub fpm_max_children: Option<u32>,
+}
+
+/// Workers per pool when the config says nothing. Enough that a browser opening
+/// many parallel requests to one site doesn't queue, low enough that a runaway
+/// app can't exhaust memory before `pm.process_idle_timeout` reaps the workers.
+pub const DEFAULT_FPM_MAX_CHILDREN: u32 = 40;
+
+impl LocalConfig {
+    /// Workers allowed per php-fpm pool. Clamped to at least 1, since a pool
+    /// with no workers accepts connections and then never answers them — a
+    /// hang that presents as a gateway timeout rather than a config error.
+    pub fn fpm_max_children(&self) -> u32 {
+        self.fpm_max_children.unwrap_or(DEFAULT_FPM_MAX_CHILDREN).max(1)
+    }
 }
 
 impl LocalConfig {

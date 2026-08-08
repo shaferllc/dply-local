@@ -373,6 +373,13 @@ impl Registry {
             self.fpm.retain(&BTreeSet::new());
         }
 
+        // `pm.max_children` is read from the config file when a master starts,
+        // so a change can only reach a pool that is restarted — drop them all
+        // and let the loop below bring them back at the new ceiling.
+        if self.fpm.set_max_children(self.config.fpm_max_children()) {
+            self.fpm.retain(&BTreeSet::new());
+        }
+
         // Ensure a master per distinct (PHP binary, Xdebug mode, profiler); drop the
         // rest. Remember each site's binary so we don't resolve it again for routes.
         let mut needed: BTreeSet<MasterKey> = BTreeSet::new();
@@ -1110,6 +1117,73 @@ impl Registry {
     /// Every supervised Octane server's current state.
     pub fn octane_statuses(&self) -> Vec<crate::appserver::AppServerInfo> {
         self.appservers.statuses()
+    }
+
+    /// Every php-fpm pool, with how many sites route to each.
+    ///
+    /// The site count is computed here rather than in the pool manager because
+    /// only the registry knows the mapping: a pool is keyed by PHP version and
+    /// Xdebug mode, and which sites land on it falls out of per-site config.
+    pub fn fpm_pools(&self) -> Vec<dpl_core::ipc::FpmPoolInfo> {
+        let mut counts: BTreeMap<crate::fpm::MasterKey, u32> = BTreeMap::new();
+        // Reuse the versions cached by the last reconcile rather than calling
+        // `php::detect()`, which spawns a process per installed version — this
+        // runs with the registry lock held, on every `dpl fpm status`.
+        for site in sites::resolve(&self.config) {
+            // Octane and proxied sites are served by their own server, not a pool.
+            if site.runtime.as_deref().is_some_and(|r| r != "fpm") {
+                continue;
+            }
+            let bin = match &site.php {
+                Some(v) => self
+                    .php_versions
+                    .iter()
+                    .find(|p| &p.version == v)
+                    .map(|p| p.binary.clone())
+                    .unwrap_or_else(|| self.default_php_bin.clone()),
+                None => self.default_php_bin.clone(),
+            };
+            let key = (bin, site.xdebug.clone(), site.profile, site.preload.clone());
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        self.fpm.pools(&counts)
+    }
+
+    /// Ports of every live pool, for the supervision tick to scrape.
+    pub fn fpm_live_ports(&self) -> Vec<u16> {
+        self.fpm.live_ports()
+    }
+
+    /// Fold scraped pool status back into the manager.
+    pub fn fpm_apply_stats(&mut self, scraped: &[(u16, Option<dpl_core::ipc::FpmPoolStats>)]) {
+        self.fpm.apply_stats(scraped);
+    }
+
+    /// Notice pools whose master has exited. True when something died.
+    pub fn fpm_supervise(&mut self) -> bool {
+        self.fpm.supervise()
+    }
+
+    /// Restart pools that died, respecting their backoff.
+    pub fn fpm_respawn_failed(&mut self) -> usize {
+        self.fpm.respawn_failed()
+    }
+
+    /// Gracefully reload every pool's workers.
+    pub fn reload_fpm(&mut self) -> Result<String> {
+        let n = self.fpm.reload_all();
+        Ok(match n {
+            0 => "No php-fpm pools are running.".to_string(),
+            1 => "Reloaded 1 php-fpm pool.".to_string(),
+            n => format!("Reloaded {n} php-fpm pools."),
+        })
+    }
+
+    /// Stop every pool and rebuild from config.
+    pub fn restart_fpm(&mut self) -> Result<String> {
+        let n = self.fpm.restart_all();
+        let serving = self.reconcile();
+        Ok(format!("Restarted {n} php-fpm pool(s); serving {serving} site(s)."))
     }
 
     /// The Octane sites to fingerprint this tick, with the project root to scan.

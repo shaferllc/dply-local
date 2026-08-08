@@ -130,6 +130,50 @@ pub(crate) async fn handle(
     Ok(response)
 }
 
+/// Explain a failed FastCGI exchange using what the pool last told us about
+/// itself.
+///
+/// "php-fpm did not respond" is true and useless: the overwhelmingly common
+/// cause is that every worker is busy and the connection sat in the listen
+/// queue until it timed out, which is a capacity problem with an obvious fix,
+/// not a crash. The numbers come from the supervision tick's cache rather than
+/// a fresh scrape because a pool with no free worker cannot serve its own
+/// status page either — asking now would time out too, and say nothing.
+fn fpm_failure_detail(port: u16, err: &str) -> String {
+    describe_fpm_failure(crate::fpm::cached_stats(port), crate::fpm::cached_max_children(), err)
+}
+
+/// The wording, split from the cache lookup so it can be tested directly rather
+/// than by arranging a saturated pool on a live machine.
+fn describe_fpm_failure(
+    stats: Option<dpl_core::ipc::FpmPoolStats>,
+    max: u32,
+    err: &str,
+) -> String {
+    let Some(stats) = stats else {
+        return format!("php-fpm did not respond ({err})");
+    };
+    if stats.saturated(max) {
+        return format!(
+            "php-fpm has no free workers: {}/{} busy, {} request(s) queued. \
+             The pool is at its limit — raise `fpm_max_children` in ~/.dpl/config.toml, \
+             or find what is holding workers (`dpl fpm status`, and the pool's slow log).",
+            stats.active, max, stats.listen_queue,
+        );
+    }
+    if stats.max_children_reached > 0 {
+        return format!(
+            "php-fpm did not respond ({err}). This pool has hit its {max}-worker limit \
+             {} time(s) since it started, so it may be saturating under load — `dpl fpm status`.",
+            stats.max_children_reached,
+        );
+    }
+    format!(
+        "php-fpm did not respond ({err}). Pool: {} active / {} idle of {max} max — `dpl fpm status`.",
+        stats.active, stats.idle,
+    )
+}
+
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Incoming>;
 static CLIENT: OnceLock<HttpClient> = OnceLock::new();
 
@@ -214,7 +258,10 @@ async fn serve_site(
             let fcgi = crate::fastcgi::request(route.fpm_addr, &params, &body);
             match tokio::time::timeout(std::time::Duration::from_secs(60), fcgi).await {
                 Ok(Ok(resp)) => parse_cgi(&resp.stdout),
-                Ok(Err(e)) => error_page(StatusCode::BAD_GATEWAY, &format!("php-fpm did not respond ({e})")),
+                Ok(Err(e)) => error_page(
+                    StatusCode::BAD_GATEWAY,
+                    &fpm_failure_detail(route.fpm_addr.port(), &e.to_string()),
+                ),
                 Err(_) => error_page(
                     StatusCode::GATEWAY_TIMEOUT,
                     "The app took too long to respond (over 60s) — check its database/services.",
@@ -545,6 +592,52 @@ fn boxed<E: Into<Box<dyn StdError + Send + Sync>>>(e: E) -> Box<dyn StdError + S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stats(active: u32, idle: u32, total: u32, queue: u32) -> dpl_core::ipc::FpmPoolStats {
+        dpl_core::ipc::FpmPoolStats {
+            active,
+            idle,
+            total,
+            listen_queue: queue,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_saturated_pool_is_named_as_such_rather_than_blamed_on_php() {
+        // The case that motivated all this: every worker busy, callers queued.
+        // "did not respond" was true and useless; the fix has to say *why*.
+        let msg = describe_fpm_failure(Some(stats(40, 0, 40, 12)), 40, "timed out");
+        assert!(msg.contains("no free workers"), "{msg}");
+        assert!(msg.contains("40/40"), "{msg}");
+        assert!(msg.contains("12 request(s) queued"), "{msg}");
+        assert!(msg.contains("fpm_max_children"), "should point at the actual remedy: {msg}");
+    }
+
+    #[test]
+    fn a_healthy_pool_still_reports_the_underlying_error() {
+        // Not every 502 is saturation — a crash must not be mislabelled as load.
+        let msg = describe_fpm_failure(Some(stats(1, 5, 6, 0)), 40, "connection refused");
+        assert!(msg.contains("connection refused"), "{msg}");
+        assert!(!msg.contains("no free workers"), "{msg}");
+    }
+
+    #[test]
+    fn with_no_cached_stats_it_says_only_what_it_knows() {
+        let msg = describe_fpm_failure(None, 40, "timed out");
+        assert_eq!(msg, "php-fpm did not respond (timed out)");
+    }
+
+    #[test]
+    fn a_pool_that_has_hit_its_ceiling_before_is_flagged_even_when_idle_now() {
+        // Saturation is bursty: by the time a human looks, the queue has
+        // drained. The historical counter is what survives the burst.
+        let mut s = stats(2, 3, 5, 0);
+        s.max_children_reached = 4;
+        let msg = describe_fpm_failure(Some(s), 40, "timed out");
+        assert!(msg.contains("hit its 40-worker limit"), "{msg}");
+        assert!(msg.contains("4 time(s)"), "{msg}");
+    }
 
     /// A throwaway docroot. No `tempfile` dep here, so build one by hand and
     /// name it uniquely — tests share a process and run in parallel.

@@ -268,6 +268,12 @@ async fn dispatch(
             mutate(state, |r| r.use_php(&version, site.as_deref())).await
         }
         Request::Reload => mutate(state, |r| r.reload()).await,
+        Request::FpmStatus => {
+            let pools = state.registry.lock().await.fpm_pools();
+            Response::FpmPools { pools }
+        }
+        Request::ReloadFpm => mutate(state, |r| r.reload_fpm()).await,
+        Request::RestartFpm => mutate(state, |r| r.restart_fpm()).await,
         Request::RepairBackends => mutate(state, |r| r.repair_backends()).await,
         Request::Tld { action, name } => {
             let mut reg = state.registry.lock().await;

@@ -92,6 +92,14 @@ fn run() -> Result<()> {
             commands::local::setup(home.as_deref(), !no_ports, as_user.as_deref())
         }
         Command::Runtime { site, runtime } => commands::local::set_runtime(home.as_deref(), site, runtime),
+        Command::Fpm { command } => match command {
+            None | Some(cli::FpmCmd::Status) => commands::fpm::status(home.as_deref(), args.json),
+            Some(cli::FpmCmd::Reload) => commands::fpm::reload(home.as_deref()),
+            Some(cli::FpmCmd::Restart) => commands::fpm::restart(home.as_deref()),
+            Some(cli::FpmCmd::Slow { lines, follow }) => {
+                commands::fpm::slow(home.as_deref(), lines, follow)
+            }
+        },
         Command::Octane { command } => match command {
             None | Some(cli::OctaneCmd::Status) => {
                 commands::octane::status(home.as_deref(), args.json)

@@ -194,6 +194,11 @@ pub enum Command {
     /// Laravel Octane sites: install one, see what's running, reload the workers
     /// holding your application in memory, and control the file watching that
     /// reloads them for you. `dpl octane` with no subcommand lists them.
+    /// php-fpm pools: how loaded they are, and reloading or restarting them.
+    Fpm {
+        #[command(subcommand)]
+        command: Option<FpmCmd>,
+    },
     Octane {
         #[command(subcommand)]
         command: Option<OctaneCmd>,
@@ -612,6 +617,34 @@ pub enum TagsCmd {
     /// Remove a tag from every site that carries it.
     Delete {
         tag: String,
+    },
+}
+
+/// php-fpm pool operations.
+///
+/// A pool is shared by every site on the same PHP version and Xdebug mode — one
+/// master serves many document roots — so these act on pools, not on sites.
+#[derive(Subcommand)]
+pub enum FpmCmd {
+    /// Show every pool: workers, queue depth, and saturation (the default).
+    Status,
+    /// Replace each pool's workers without closing its listening socket, so no
+    /// request is dropped. Picks up changed PHP ini; will *not* change settings
+    /// read once at startup, such as the worker ceiling or the Xdebug mode.
+    Reload,
+    /// Stop every pool and rebuild it from config. The blunt instrument, for a
+    /// wedged pool or a changed worker ceiling.
+    Restart,
+    /// Show the slow-request log: a PHP backtrace for every request that ran
+    /// longer than the slowlog threshold. The fastest way to find what is
+    /// actually holding workers.
+    Slow {
+        /// How many lines to show.
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+        /// Follow the log as it grows.
+        #[arg(short, long)]
+        follow: bool,
     },
 }
 

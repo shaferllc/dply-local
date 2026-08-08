@@ -113,6 +113,14 @@ pub enum Request {
     Proxy { action: String, name: String, target: Option<String> },
     /// Pin a PHP version for a site (or set the default when `site` is None).
     UsePhp { version: String, site: Option<String> },
+    /// Every php-fpm pool dpl supervises, with php-fpm's own live counters.
+    FpmStatus,
+    /// Gracefully reload every php-fpm pool (SIGUSR2). Workers are replaced
+    /// without the listening socket ever closing, so no request is dropped.
+    ReloadFpm,
+    /// Stop every php-fpm master and let the next reconcile rebuild them. The
+    /// blunt instrument for a pool that is wedged rather than merely stale.
+    RestartFpm,
     /// Re-read the config from disk and reconcile backends.
     Reload,
     /// Hard-reset all backends: stop + reap all php-fpm/Octane servers, rebuild.
@@ -210,6 +218,10 @@ pub enum Response {
     AppServers {
         servers: Vec<AppServerInfo>,
     },
+    /// php-fpm pools and their live counters.
+    FpmPools {
+        pools: Vec<FpmPoolInfo>,
+    },
     /// Supervised Node dev servers and their state.
     DevServers {
         servers: Vec<DevServerInfo>,
@@ -225,6 +237,94 @@ pub enum Response {
 
     #[serde(other)]
     Unknown,
+}
+
+/// One php-fpm pool — the master dpl supervises, plus whatever php-fpm's own
+/// status page last reported about it.
+///
+/// A pool is keyed by (PHP version, Xdebug mode, profiler, preload) rather than
+/// by site, because that is what forces a separate master: `xdebug.mode` is read
+/// once at process start and cannot be set per request. Many sites therefore
+/// share one pool, and `sites` is how many are pointed at this one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FpmPoolInfo {
+    /// PHP version label, e.g. `8.4`.
+    pub php: String,
+    /// Xdebug mode this master started with (`off`, `debug`, `profile`, …).
+    pub mode: String,
+    /// Whether the SPX profiler is loaded into this pool.
+    #[serde(default)]
+    pub profile: bool,
+    /// The `opcache.preload` script this pool boots with, if any.
+    #[serde(default)]
+    pub preload: Option<String>,
+    /// Loopback port the pool listens on for FastCGI.
+    pub port: u16,
+    /// Master pid, when it is running.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    pub running: bool,
+    /// How many sites currently route to this pool.
+    #[serde(default)]
+    pub sites: u32,
+    /// Live counters from php-fpm's status page. `None` when the pool has not
+    /// answered a scrape yet — a pool saturated to `max_children` cannot serve
+    /// its own status page either, since that is handled by a worker.
+    #[serde(default)]
+    pub stats: Option<FpmPoolStats>,
+    /// Why it isn't running, when it isn't.
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Absolute path to the pool's error log.
+    pub log: String,
+    /// Absolute path to the slow-request log, where php-fpm writes a PHP
+    /// backtrace for any request over the slowlog threshold.
+    #[serde(default)]
+    pub slowlog: Option<String>,
+}
+
+/// php-fpm's own view of a pool, as reported by `pm.status_path`.
+///
+/// Field names mirror php-fpm's JSON keys rather than being renamed, so what
+/// dpl prints can be matched against php-fpm's documentation directly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FpmPoolStats {
+    /// Workers currently handling a request.
+    #[serde(default)]
+    pub active: u32,
+    /// Workers forked and waiting.
+    #[serde(default)]
+    pub idle: u32,
+    #[serde(default)]
+    pub total: u32,
+    /// Connections waiting for a free worker *right now*. Sustained non-zero is
+    /// the signature of a saturated pool.
+    #[serde(default)]
+    pub listen_queue: u32,
+    /// High-water mark of the above since the master started.
+    #[serde(default)]
+    pub max_listen_queue: u32,
+    /// How many times the pool has hit `pm.max_children`. Any non-zero value
+    /// means requests have queued for want of a worker.
+    #[serde(default)]
+    pub max_children_reached: u32,
+    /// Requests that exceeded `request_slowlog_timeout` and were backtraced.
+    #[serde(default)]
+    pub slow_requests: u32,
+    /// Requests the pool has accepted since it started.
+    #[serde(default)]
+    pub accepted_conn: u64,
+    /// Seconds since the master started.
+    #[serde(default)]
+    pub uptime: u64,
+}
+
+impl FpmPoolStats {
+    /// Whether the pool is out of workers: every one busy and callers queuing.
+    /// This is the state that turns into a connect timeout and then a 502.
+    pub fn saturated(&self, max_children: u32) -> bool {
+        self.listen_queue > 0 && (self.total >= max_children || self.idle == 0)
+    }
 }
 
 /// One supervised Octane application server, as reported to the CLI/GUI.

@@ -156,6 +156,14 @@ fn main() -> anyhow::Result<()> {
             tokio::spawn(async move { appserver::watch(state).await })
         };
 
+        // Scrape php-fpm's own status page so a saturated pool can be named as
+        // such, and respawn masters that die instead of waiting for a request
+        // to notice.
+        let fpm_task = {
+            let state = state.clone();
+            tokio::spawn(async move { fpm::watch(state).await })
+        };
+
         let result = server::run(state).await;
 
         proxy_task.abort();
@@ -166,6 +174,7 @@ fn main() -> anyhow::Result<()> {
         branchdb_task.abort();
         devserver_task.abort();
         appserver_task.abort();
+        fpm_task.abort();
         result
     })
 }
